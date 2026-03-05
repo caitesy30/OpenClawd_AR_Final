@@ -6,9 +6,10 @@ using UnityEngine;
 using UnityEngine.Networking;
 using TMPro;
 using UnityEngine.UI;
+using UnityEngine.EventSystems; // 🌟 必須引入，處理點擊與懸停
 using System.Text.RegularExpressions;
 
-public class AgentCore : MonoBehaviour
+public class AgentCore : MonoBehaviour, IPointerClickHandler // 🌟 繼承點擊介面
 {
     [Header("全息 UI 綁定區")]
     public TMP_Text headerTitle;
@@ -20,36 +21,38 @@ public class AgentCore : MonoBehaviour
     public Button modelCycleButton;
 
     [Header("🚀 AI Tooling 監控系統")]
-    public Button monitorModeButton;     // 進入看板模式按鈕
-    public GameObject chatScrollArea;    // 聊天訊息區
-    public GameObject marqueePanel;      // 跑馬燈底板
-    public RectTransform marqueeTextRect;// 跑馬燈移動組件
-    public TMP_Text marqueeText;         // 跑馬燈文字
-    public Button actionMenuButton;      // Tooling 選單按鈕
-    public GameObject actionMenuPanel;   // 選單面板
-    public Button addToolingBtn;         // 子按鈕：下達 Tooling
-    public Button resolveToolingBtn;     // 子按鈕：選擇消案
-    public Button scrapeDataBtn;         // 🌟 新增：衛星抓取按鈕 (與 web_skill.py 聯動)
+    public Button monitorModeButton;
+    public GameObject chatScrollArea;
+    public GameObject marqueePanel;
+    public RectTransform marqueeTextRect;
+    public TMP_Text marqueeText;
+    public Button actionMenuButton;
+    public GameObject actionMenuPanel;
+    public Button addToolingBtn;
+    public Button resolveToolingBtn;
+    public Button scrapeDataBtn;
+
+    [Header("⚙️ 看板物理引擎")]
+    public float updateInterval = 10f;
+    public float topMarqueeSpeed = 150f;
+    public float bottomScrollSpeed = 60f;
+    private bool isHoveringTable = false;
 
     [Header("全局視覺綁定")]
-    public Image mainBackground;         // 用來染色的半透明背景
-    public RawImage cameraBackground;    // 🌟 天眼系統 (非 AR 鏡頭背景)
+    public Image mainBackground;
+    public RawImage cameraBackground;
     private WebCamTexture webCamTexture;
 
     [Header("雲端神經網路 (Firebase)")]
     public string firebaseUrl = "https://openclawd-ar-default-rtdb.asia-southeast1.firebasedatabase.app/";
 
-    // --- 系統狀態變數 ---
     private bool isWaitingForAI = false;
-    private bool isMonitorMode = false;  // 看板模式開關
-    private float marqueeSpeed = 130f;   // 跑馬燈移動速度
+    private bool isMonitorMode = false;
 
-    // 定義輸入狀態機 (用來重複利用 userInput)
     private enum InputState { Chat, WaitingAdd, WaitingResolve, WaitingID }
     private InputState currentInputState = InputState.Chat;
-    private string tempPart = "";        // 暫存消案用的料號
+    private string tempPart = "";
 
-    // 視覺與模型參數
     private string userColor = "#00BFFF";
     private string sysColor = "#00FFFF";
     private string bodyColorHex = "#FFFFFF";
@@ -59,10 +62,12 @@ public class AgentCore : MonoBehaviour
     private int currentModelIndex = 0;
     private TMP_Text modelBtnText;
 
+    // 🌟 用來追蹤目前滑鼠懸停在哪個連結上
+    private int currentlyHoveredLinkIndex = -1;
+
     void Start()
     {
         sendButton.onClick.AddListener(OnSendClicked);
-
         if (clearButton != null) clearButton.onClick.AddListener(OnClearClicked);
         if (themeCycleButton != null) themeCycleButton.onClick.AddListener(OnThemeCycleClicked);
 
@@ -73,55 +78,111 @@ public class AgentCore : MonoBehaviour
             UpdateModelButtonUI();
         }
 
-        // 🌟 重新綁定 Tooling 按鈕功能
         if (monitorModeButton != null) monitorModeButton.onClick.AddListener(ToggleMonitorMode);
         if (actionMenuButton != null) actionMenuButton.onClick.AddListener(() => actionMenuPanel.SetActive(!actionMenuPanel.activeSelf));
         if (addToolingBtn != null) addToolingBtn.onClick.AddListener(() => SwitchInputState(InputState.WaitingAdd));
         if (resolveToolingBtn != null) resolveToolingBtn.onClick.AddListener(() => SwitchInputState(InputState.WaitingResolve));
-
-        // 🌟 衛星抓取指令綁定
         if (scrapeDataBtn != null) scrapeDataBtn.onClick.AddListener(OnRequestScrapeClicked);
 
         ApplyTheme(currentThemeIndex);
         ShowWelcomeMessage();
         StartWebCam();
 
-        // 啟動定時監控資料協程 (整合圓桌會議需求)
         StartCoroutine(FetchMonitorData());
-
-        // 舊有的 FetchToolingRoutine 已被功能更強大的 FetchMonitorData 取代
-        // StartCoroutine(FetchToolingRoutine()); 
     }
 
     void Update()
     {
-        // 🌟 跑馬燈物理滾動邏輯 (航空公司看板風格)
-        if (isMonitorMode && marqueeTextRect != null)
+        if (isMonitorMode)
         {
-            marqueeTextRect.anchoredPosition += Vector2.left * marqueeSpeed * Time.deltaTime;
-
-            // 循環邏輯：如果跑出螢幕左側，就重置到右側 (預設 800 像素)
-            if (marqueeTextRect.anchoredPosition.x < -marqueeTextRect.rect.width - 200)
+            // 1. 上方橫向跑馬燈邏輯
+            if (marqueeTextRect != null)
             {
-                marqueeTextRect.anchoredPosition = new Vector2(800, 0);
+                marqueeTextRect.anchoredPosition += Vector2.left * topMarqueeSpeed * Time.deltaTime;
+                if (marqueeTextRect.anchoredPosition.x < -marqueeText.preferredWidth)
+                {
+                    marqueeTextRect.anchoredPosition = new Vector2(1000, marqueeTextRect.anchoredPosition.y);
+                }
+            }
+
+            // 2. 下方表格垂直捲動邏輯 
+            if (chatScrollArea != null && chatDisplay != null)
+            {
+                RectTransform scrollRectTransform = chatScrollArea.GetComponent<RectTransform>();
+                isHoveringTable = RectTransformUtility.RectangleContainsScreenPoint(scrollRectTransform, Input.mousePosition);
+
+                if (!isHoveringTable)
+                {
+                    ScrollRect sr = chatScrollArea.GetComponent<ScrollRect>();
+                    if (sr != null)
+                    {
+                        sr.movementType = ScrollRect.MovementType.Unrestricted;
+                        RectTransform contentRect = sr.content;
+                        if (contentRect != null && contentRect.rect.height > scrollRectTransform.rect.height)
+                        {
+                            float normalizedSpeed = (bottomScrollSpeed / contentRect.rect.height) * Time.deltaTime;
+                            sr.verticalNormalizedPosition -= normalizedSpeed;
+
+                            if (sr.verticalNormalizedPosition < -0.05f)
+                            {
+                                sr.verticalNormalizedPosition = 1.05f;
+                            }
+                        }
+                    }
+
+                    // 若沒有懸停，清除選取特效
+                    if (currentlyHoveredLinkIndex != -1)
+                    {
+                        currentlyHoveredLinkIndex = -1;
+                        Canvas.ForceUpdateCanvases(); // 強制刷新以移除底線
+                    }
+                }
+                else
+                {
+                    // 🌟 懸停特效邏輯：尋找滑鼠下方的連結
+                    int linkIndex = TMP_TextUtilities.FindIntersectingLink(chatDisplay, Input.mousePosition, null);
+                    if (linkIndex != currentlyHoveredLinkIndex)
+                    {
+                        currentlyHoveredLinkIndex = linkIndex;
+                        // 觸發重新渲染以更新連結外觀 (見 FetchMonitorData 裡的邏輯)
+                    }
+                }
             }
         }
     }
 
-    // ==========================================
-    // 🚀 看板與消案核心戰術 (圓桌會議決策實作)
-    // ==========================================
+    // 🌟 核心互動：當廠長點擊到 [X] 時觸發！
+    public void OnPointerClick(PointerEventData eventData)
+    {
+        if (isMonitorMode && isHoveringTable && chatDisplay != null)
+        {
+            int linkIndex = TMP_TextUtilities.FindIntersectingLink(chatDisplay, Input.mousePosition, null);
+            if (linkIndex != -1)
+            {
+                TMP_LinkInfo linkInfo = chatDisplay.textInfo.linkInfo[linkIndex];
+                string clickedSN = linkInfo.GetLinkID();
+
+                // 觸發刪除流程：自動填入料號，並要求輸入工號確認！
+                tempPart = clickedSN;
+                AppendRawMessage($"<color=#FFD700>【準備斬首】您已選中料號：<b>{clickedSN}</b></color>");
+                AppendRawMessage("<color=#00FFFF>【系統提示】請在下方輸入您的「工號」以執行徹底刪除：</color>");
+                currentInputState = InputState.WaitingID;
+                if (actionMenuPanel != null) actionMenuPanel.SetActive(false);
+
+                ScrollRect sr = chatScrollArea.GetComponent<ScrollRect>();
+                if (sr != null) sr.verticalNormalizedPosition = 0f;
+            }
+        }
+    }
 
     void ToggleMonitorMode()
     {
         isMonitorMode = !isMonitorMode;
         if (isMonitorMode)
         {
-            // 標題改為「AI Tooling 即時監控」
-            headerTitle.text = "【AI Tooling 即時監控】";
-            if (chatScrollArea != null) chatScrollArea.SetActive(false);
+            headerTitle.text = "【底片輸出進度實時看板】";
+            if (chatScrollArea != null) chatScrollArea.SetActive(true);
             if (marqueePanel != null) marqueePanel.SetActive(true);
-            AppendRawMessage("<color=#00FF00>【系統】電視看板模式已啟動，開始輪播待處理料號。</color>");
         }
         else
         {
@@ -136,56 +197,83 @@ public class AgentCore : MonoBehaviour
     {
         if (actionMenuPanel != null) actionMenuPanel.SetActive(false);
         currentInputState = next;
-        if (chatScrollArea != null) chatScrollArea.SetActive(true); // 強制顯示對話框以查看提示文字
+        if (chatScrollArea != null) chatScrollArea.SetActive(true);
 
         if (next == InputState.WaitingAdd)
             AppendRawMessage("<color=#FFD700>【系統提示】程式課人員請注意，請在下方輸入欲下 Tooling 的料號名稱：</color>");
         else if (next == InputState.WaitingResolve)
-            AppendRawMessage("<color=#00FFFF>【系統提示】產品工程師請注意，請在下方輸入準備消案的料號名稱：</color>");
+            AppendRawMessage("<color=#00FFFF>【消案指令】請輸入要從看板上刪除的「廠內序號 (SN)」：</color>");
     }
 
-    // 🌟 手動觸發按鈕的功能 (呼叫 Python 特務抓取資料)
     public void OnRequestScrapeClicked()
     {
         if (actionMenuPanel != null) actionMenuPanel.SetActive(false);
         string command = "執行內網底片抓取任務";
         AppendToDisplay("工程師", command, userColor);
-        StartCoroutine(SendToFirebase(command)); // 將指令發往雲端供 Python 大腦攔截
+        StartCoroutine(SendToFirebase(command));
         AppendRawMessage("<color=#00FFFF>【系統】偵查兵陳平已出發，正在潛入內網抓取底片資料...</color>");
     }
 
-    // 🌟 自動監控與跑馬燈更新 (從 Firebase 讀取 web_skill.py 抓回來的資料)
     IEnumerator FetchMonitorData()
     {
         while (true)
         {
-            if (isMonitorMode) // 只有在看板模式才啟動偵查
+            if (isMonitorMode)
             {
-                // 從 Firebase 的 tooling_monitor 節點讀取資料
                 UnityWebRequest req = UnityWebRequest.Get($"{firebaseUrl}tooling_monitor.json");
                 yield return req.SendWebRequest();
 
                 if (req.result == UnityWebRequest.Result.Success && req.downloadHandler.text != "null")
                 {
                     string json = req.downloadHandler.text;
-                    // 使用正規表達式提取：廠內序號 (sn) 與 輸出內容 (content)
-                    MatchCollection matches = Regex.Matches(json, "\"sn\":\"([^\"]+)\".*?\"content\":\"([^\"]+)\"");
+                    MatchCollection itemMatches = Regex.Matches(json, "{[^{}]+}");
 
-                    string marqueeString = " 🚨 實時內網底片進度： ";
-                    int count = 0;
-                    foreach (Match m in matches)
+                    string listContent = "<size=40><color=#FFFF00><b><pos=0%>項次</pos><pos=10%>廠內序號</pos><pos=35%>輸出內容</pos><pos=58%>輸出時間</pos><pos=88%>操作</pos></b></color></size>\n";
+                    listContent += "<color=#555555>──────────────────────────────────────────────────────────────────────────────</color>\n";
+
+                    HashSet<string> uniqueSNs = new HashSet<string>();
+                    string marqueeString = " 🚨 今日未重複待辦料號： ";
+                    int index = 1;
+                    int linkCounter = 0; // 用來計算這是第幾個連結，以配合 currentlyHoveredLinkIndex
+
+                    foreach (Match item in itemMatches)
                     {
-                        marqueeString += $" 【{m.Groups[1].Value}】{m.Groups[2].Value}  ✦ ";
-                        count++;
+                        string itemJson = item.Value;
+                        if (!itemJson.Contains("\"status\":\"Fetched\"")) continue;
+
+                        string sn = Regex.Match(itemJson, "\"sn\":\"([^\"]+)\"").Groups[1].Value;
+                        string content = Regex.Match(itemJson, "\"content\":\"([^\"]+)\"").Groups[1].Value;
+                        string time = Regex.Match(itemJson, "\"time\":\"([^\"]+)\"").Groups[1].Value;
+
+                        if (sn.Contains("歡迎") || sn.Contains("底片") || string.IsNullOrEmpty(sn)) continue;
+                        if (time.Length >= 16) time = time.Substring(5, 11);
+
+                        if (uniqueSNs.Add(sn))
+                        {
+                            marqueeString += $" 【{sn}】 ✦ ";
+                        }
+
+                        // 🌟 懸停特效：如果滑鼠指著這個連結，就加上底線 <u> 和黃色特效！
+                        string btnStyle = (linkCounter == currentlyHoveredLinkIndex && isHoveringTable)
+                            ? $"<u><color=#FFFF00>[刪除]</color></u>"
+                            : $"<color=#FF0000>[X]</color>";
+
+                        string deleteButton = $"<link=\"{sn}\">{btnStyle}</link>";
+
+                        listContent += $"<size=40><pos=0%><mspace=0.6em>{index,2}</mspace></pos><pos=10%><color=#00FFFF><mspace=0.6em>{sn}</mspace></color></pos><pos=35%><mspace=0.6em>{content}</mspace></pos><pos=58%><mspace=0.6em>{time}</mspace></pos><pos=88%>{deleteButton}</pos></size>\n\n";
+
+                        index++;
+                        linkCounter++;
                     }
 
-                    if (count > 0 && marqueeText != null)
-                    {
-                        marqueeText.text = marqueeString;
-                    }
+                    if (index == 1) listContent = "<size=60><color=#00FF00>✅ 產線清空！目前所有項目皆已消案或刪除。</color></size>";
+
+                    // 即使懸停也要更新 UI (為了顯示特效)，但不要干擾捲動
+                    if (marqueeText != null) marqueeText.text = marqueeString;
+                    if (chatDisplay != null) chatDisplay.text = listContent;
                 }
             }
-            yield return new WaitForSeconds(30f); // 每 30 秒更新一次看板資料
+            yield return new WaitForSeconds(updateInterval);
         }
     }
 
@@ -195,28 +283,23 @@ public class AgentCore : MonoBehaviour
         string msg = userInput.text;
         userInput.text = "";
 
-        // 🌟 狀態機攔截：判斷目前是不是在輸入 Tooling 特殊資料
         switch (currentInputState)
         {
             case InputState.WaitingAdd:
-                // 程式課輸入料號
                 StartCoroutine(UpdateFirebaseTooling(msg, "", "Pending"));
                 currentInputState = InputState.Chat;
                 break;
             case InputState.WaitingResolve:
-                // 產品工程師輸入料號，接著詢問工號
                 tempPart = msg;
                 AppendRawMessage("<color=#00FFFF>【系統提示】請輸入產品工程師您的「工號」以完成消案授權：</color>");
                 currentInputState = InputState.WaitingID;
                 break;
             case InputState.WaitingID:
-                // 產品工程師輸入工號，執行消案
                 StartCoroutine(UpdateFirebaseTooling(tempPart, msg, "Resolved"));
                 currentInputState = InputState.Chat;
                 tempPart = "";
                 break;
             default:
-                // 正常聊天模式：發送給 AI
                 AppendToDisplay("工程師", msg, userColor);
                 StartCoroutine(SendToFirebase(msg));
                 if (!isWaitingForAI) StartCoroutine(ListenForAIResponse());
@@ -224,10 +307,8 @@ public class AgentCore : MonoBehaviour
         }
     }
 
-    // --- 🌟 關鍵修正：發送新問題前，先斬斷舊回應，防止重疊抓取 ---
     IEnumerator SendToFirebase(string message)
     {
-        // 先刪除雲端現有的 AI 回應節點，避免 Unity 誤讀上一題的答案
         string responseUrl = firebaseUrl + "chat/aiResponse.json";
         UnityWebRequest clearReq = UnityWebRequest.Delete(responseUrl);
         yield return clearReq.SendWebRequest();
@@ -244,7 +325,6 @@ public class AgentCore : MonoBehaviour
         yield return request.SendWebRequest();
     }
 
-    // --- 🌟 關鍵修正：讀取到答案後，立即執行「閱後即焚」，確保資料新鮮 ---
     IEnumerator ListenForAIResponse()
     {
         isWaitingForAI = true;
@@ -265,11 +345,8 @@ public class AgentCore : MonoBehaviour
                     if (response != null && !string.IsNullOrEmpty(response.text))
                     {
                         AppendRawMessage(response.text);
-
-                        // 閱後即焚：讀取成功後立即刪除 Firebase 上的答案
                         UnityWebRequest deleteReq = UnityWebRequest.Delete(url);
                         yield return deleteReq.SendWebRequest();
-
                         isWaitingForAI = false;
                     }
                 }
@@ -277,47 +354,25 @@ public class AgentCore : MonoBehaviour
         }
     }
 
-    // 更新 Firebase 中的 Tooling 狀態 (Add 或 Resolve)
     IEnumerator UpdateFirebaseTooling(string part, string id, string status)
     {
-        string time = DateTime.Now.ToString("yyyy-MM-dd HH:mm");
-        string url = $"{firebaseUrl}tooling/{part}.json"; // 以料號為節點 Key
+        string time = DateTime.Now.ToString("MM-dd HH:mm");
+        string url = $"{firebaseUrl}tooling_monitor/{part}.json";
 
         string json = status == "Pending" ?
-            $"{{\"part\":\"{part}\", \"createTime\":\"{time}\", \"status\":\"Pending\"}}" :
-            $"{{\"engineerId\":\"{id}\", \"resolveTime\":\"{time}\", \"status\":\"Resolved\"}}";
+            $"{{\"sn\":\"{part}\", \"content\":\"手動新增\", \"time\":\"{time}\", \"status\":\"Fetched\"}}" :
+            $"{{\"sn\":\"{part}\", \"status\":\"Resolved\"}}";
 
         byte[] bodyRaw = Encoding.UTF8.GetBytes(json);
-        UnityWebRequest req = new UnityWebRequest(url, "PATCH"); // 用 PATCH 進行更新
+        UnityWebRequest req = new UnityWebRequest(url, "PATCH");
         req.uploadHandler = new UploadHandlerRaw(bodyRaw);
         req.downloadHandler = new DownloadHandlerBuffer();
         req.SetRequestHeader("Content-Type", "application/json");
 
         yield return req.SendWebRequest();
 
-        AppendRawMessage($"<color=#00FF00>【成功】料號 {part} 已更新狀態：{status} (於 {time} )</color>");
-        if (isMonitorMode && chatScrollArea != null) chatScrollArea.SetActive(false);
+        AppendRawMessage($"<color=#00FF00>【斬首成功】料號 {part} 已消案並從看板永遠抹除 (於 {time} )</color>");
     }
-
-    // 定期輪詢舊版 Tooling (保留作為兼容參考，已不再直接調用)
-    IEnumerator FetchToolingRoutine()
-    {
-        while (true)
-        {
-            UnityWebRequest req = UnityWebRequest.Get($"{firebaseUrl}tooling.json");
-            yield return req.SendWebRequest();
-            if (req.result == UnityWebRequest.Result.Success && req.downloadHandler.text != "null")
-            {
-                // 此處為舊版測試字串，新版已由 FetchMonitorData 實現動態解析
-                // marqueeText.text = " 🚨 待消案： [G68P177] [G28P016] 請儘速處理！ ";
-            }
-            yield return new WaitForSeconds(10f);
-        }
-    }
-
-    // ==========================================
-    // 🌟 原有視覺功能：鏡頭、主題、模型 (完美保留)
-    // ==========================================
 
     void StartWebCam()
     {
