@@ -2239,7 +2239,7 @@ MonoBehaviour:
   m_TargetGraphic: {fileID: 2133531888}
   m_HandleRect: {fileID: 2133531887}
   m_Direction: 2
-  m_Value: 0
+  m_Value: 1
   m_Size: 1
   m_NumberOfSteps: 0
   m_OnValueChanged:
@@ -2861,7 +2861,7 @@ MonoBehaviour:
   m_OnCullStateChanged:
     m_PersistentCalls:
       m_Calls: []
-  m_text: "<size=40><color=#FFFF00><b><pos=2%>\u9805\u6B21</pos><pos=15%>\u5EE0\u5167\u5E8F\u865F</pos><pos=40%>\u8F38\u51FA\u5167\u5BB9</pos><pos=60%>\u8F38\u51FA\u6642\u9593</pos><pos=90%>\u64CD\u4F5C</pos></b></color></size>\\n<color=#555555>\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500</color>"
+  m_text: "<size=38><pos=2%>\u9805\u6B21</pos><pos=10%>\u5EE0\u5167\u5E8F\u865F</pos><pos=28%>\u8F38\u51FA\u5167\u5BB9</pos><pos=52%><color=#FFA500>\u5DE5\u7A0B\u5E2B</color></pos><pos=68%>\u8F38\u51FA\u6642\u9593</pos><pos=90%>\u64CD\u4F5C</pos></size>\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500</color>"
   m_isRightToLeft: 0
   m_fontAsset: {fileID: 11400000, guid: d970749bc9fb9694cb0d6ca61763d65a, type: 2}
   m_sharedMaterial: {fileID: -4290851184348592505, guid: d970749bc9fb9694cb0d6ca61763d65a, type: 2}
@@ -4066,8 +4066,8 @@ RectTransform:
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
   m_AnchorMin: {x: 0, y: 1}
   m_AnchorMax: {x: 0, y: 1}
-  m_AnchoredPosition: {x: 531.8248, y: 0}
-  m_SizeDelta: {x: 1063.6497, y: 0}
+  m_AnchoredPosition: {x: 951.78357, y: 0}
+  m_SizeDelta: {x: 1903.5671, y: 0}
   m_Pivot: {x: 0.5, y: 1}
 --- !u!114 &1510354492
 MonoBehaviour:
@@ -5221,7 +5221,7 @@ MonoBehaviour:
   m_HandleRect: {fileID: 1806049365}
   m_Direction: 0
   m_Value: 1
-  m_Size: 0.9999999
+  m_Size: 1
   m_NumberOfSteps: 0
   m_OnValueChanged:
     m_PersistentCalls:

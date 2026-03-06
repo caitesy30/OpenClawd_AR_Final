@@ -9,7 +9,7 @@ using UnityEngine.UI;
 using UnityEngine.EventSystems; // 🌟 必須引入，處理點擊與懸停
 using System.Text.RegularExpressions;
 
-public class AgentCore : MonoBehaviour
+public class AgentCore : MonoBehaviour, IPointerClickHandler // 🌟 繼承點擊介面，強化偵測
 {
     [Header("全息 UI 綁定區")]
     public TMP_Text headerTitle;
@@ -50,9 +50,15 @@ public class AgentCore : MonoBehaviour
     private bool isWaitingForAI = false;
     private bool isMonitorMode = false;
 
-    private enum InputState { Chat, WaitingAdd, WaitingResolve, WaitingID }
+    // 🌟 狀態機：升級為多階消案驗證 (結合廠長新舊需求)
+    private enum InputState { Chat, WaitingAdd, WaitingResolveSN, WaitingResolveContent, WaitingResolveID, WaitingResolve, WaitingID }
     private InputState currentInputState = InputState.Chat;
-    private string tempPart = "";
+
+    // 🌟 儲存準備刪除的組合資料 (解決 tempPart 不存在報錯)
+    private string tempDbKey = "";
+    private string tempPartSN = "";
+    private string tempPartContent = "";
+    private string tempPart = ""; // 保留舊變數以免報錯
 
     private string userColor = "#00BFFF";
     private string sysColor = "#00FFFF";
@@ -63,8 +69,11 @@ public class AgentCore : MonoBehaviour
     private int currentModelIndex = 0;
     private TMP_Text modelBtnText;
 
+    private int currentlyHoveredLinkIndex = -1;
+
     void Start()
     {
+        // 基礎監聽掛載
         sendButton.onClick.AddListener(OnSendClicked);
         if (clearButton != null) clearButton.onClick.AddListener(OnClearClicked);
         if (themeCycleButton != null) themeCycleButton.onClick.AddListener(OnThemeCycleClicked);
@@ -78,13 +87,24 @@ public class AgentCore : MonoBehaviour
 
         if (monitorModeButton != null) monitorModeButton.onClick.AddListener(ToggleMonitorMode);
         if (actionMenuButton != null) actionMenuButton.onClick.AddListener(() => actionMenuPanel.SetActive(!actionMenuPanel.activeSelf));
+
+        // 狀態切換掛載
         if (addToolingBtn != null) addToolingBtn.onClick.AddListener(() => SwitchInputState(InputState.WaitingAdd));
-        if (resolveToolingBtn != null) resolveToolingBtn.onClick.AddListener(() => SwitchInputState(InputState.WaitingResolve));
+        if (resolveToolingBtn != null) resolveToolingBtn.onClick.AddListener(() => SwitchInputState(InputState.WaitingResolveSN));
         if (scrapeDataBtn != null) scrapeDataBtn.onClick.AddListener(OnRequestScrapeClicked);
+
+        // 🌟【賈伯斯防呆術】自動修復雷達：確保 UI 點擊系統存在
+        if (FindObjectOfType<EventSystem>() == null)
+        {
+            GameObject es = new GameObject("EventSystem");
+            es.AddComponent<EventSystem>();
+            es.AddComponent<StandaloneInputModule>();
+        }
 
         // 🌟 終極雷達裝配：為 ChatDisplay 自動掛上感應器與相機校正
         if (chatDisplay != null)
         {
+            chatDisplay.raycastTarget = true;
             EventTrigger trigger = chatDisplay.gameObject.GetComponent<EventTrigger>() ?? chatDisplay.gameObject.AddComponent<EventTrigger>();
             trigger.triggers.Clear();
 
@@ -95,10 +115,10 @@ public class AgentCore : MonoBehaviour
 
             // 滑鼠離開 (恢復捲動)
             EventTrigger.Entry exitEntry = new EventTrigger.Entry { eventID = EventTriggerType.PointerExit };
-            exitEntry.callback.AddListener((data) => { isHoveringTable = false; });
+            exitEntry.callback.AddListener((data) => { isHoveringTable = false; currentlyHoveredLinkIndex = -1; Canvas.ForceUpdateCanvases(); });
             trigger.triggers.Add(exitEntry);
 
-            // 🌟 精準點擊斬首！
+            // 🌟 精準點擊斬首！(處理 AR 空間坐標)
             EventTrigger.Entry clickEntry = new EventTrigger.Entry { eventID = EventTriggerType.PointerClick };
             clickEntry.callback.AddListener((data) => {
                 PointerEventData pData = (PointerEventData)data;
@@ -108,8 +128,23 @@ public class AgentCore : MonoBehaviour
                 int linkIndex = TMP_TextUtilities.FindIntersectingLink(chatDisplay, pData.position, cam);
                 if (linkIndex != -1)
                 {
-                    string clickedSN = chatDisplay.textInfo.linkInfo[linkIndex].GetLinkID();
-                    TriggerDeleteProcess(clickedSN);
+                    TMP_LinkInfo linkInfo = chatDisplay.textInfo.linkInfo[linkIndex];
+                    string linkID = linkInfo.GetLinkID();
+
+                    // 判斷是新版組合金鑰還是舊版單一 SN
+                    if (linkID.Contains("|"))
+                    {
+                        string[] parts = linkID.Split('|');
+                        if (parts.Length >= 3)
+                        {
+                            tempDbKey = parts[0]; tempPartSN = parts[1]; tempPartContent = parts[2];
+                            TriggerDeleteVerification();
+                        }
+                    }
+                    else
+                    {
+                        TriggerDeleteProcess(linkID); // 兼容舊版
+                    }
                 }
             });
             trigger.triggers.Add(clickEntry);
@@ -119,6 +154,7 @@ public class AgentCore : MonoBehaviour
         ShowWelcomeMessage();
         StartWebCam();
 
+        // 啟動雲端同步協程
         StartCoroutine(FetchMonitorData());
     }
 
@@ -126,17 +162,17 @@ public class AgentCore : MonoBehaviour
     {
         if (isMonitorMode)
         {
-            // 1. 上方橫向跑馬燈邏輯
+            // 1. 上排跑馬燈邏輯 (橫向移動)
             if (marqueeTextRect != null)
             {
                 marqueeTextRect.anchoredPosition += Vector2.left * topMarqueeSpeed * Time.deltaTime;
                 if (marqueeTextRect.anchoredPosition.x < -marqueeText.preferredWidth)
                 {
-                    marqueeTextRect.anchoredPosition = new Vector2(1000, marqueeTextRect.anchoredPosition.y);
+                    marqueeTextRect.anchoredPosition = new Vector2(Screen.width > 0 ? Screen.width : 1000, marqueeTextRect.anchoredPosition.y);
                 }
             }
 
-            // 2. 🌟 下方表格「無縫瀑布流」邏輯
+            // 2. 下排瀑布流邏輯 (無縫捲動)
             if (chatScrollArea != null && chatDisplay != null && !isHoveringTable)
             {
                 RectTransform scrollRectTransform = chatScrollArea.GetComponent<RectTransform>();
@@ -145,14 +181,14 @@ public class AgentCore : MonoBehaviour
                 if (sr != null)
                 {
                     sr.movementType = ScrollRect.MovementType.Unrestricted;
-                    RectTransform contentRect = sr.content;
+                    RectTransform contentRect = chatDisplay.GetComponent<RectTransform>();
 
                     if (contentRect != null)
                     {
                         // 強制向上推進
                         contentRect.anchoredPosition += Vector2.up * bottomScrollSpeed * Time.deltaTime;
 
-                        // 🌟 無縫輪播算法：當內容的尾巴越過視窗頂部時，瞬間拉到視窗正下方
+                        // 🌟 無縫輪播算法：當內容尾巴越過頂部，瞬間拉回視窗下方
                         if (contentRect.anchoredPosition.y >= contentRect.rect.height)
                         {
                             contentRect.anchoredPosition = new Vector2(contentRect.anchoredPosition.x, -scrollRectTransform.rect.height);
@@ -160,21 +196,57 @@ public class AgentCore : MonoBehaviour
                     }
                 }
             }
+            else if (isHoveringTable && chatDisplay != null)
+            {
+                // 懸停時偵測 Link 索引以實現高亮
+                Camera cam = chatDisplay.canvas.renderMode == RenderMode.ScreenSpaceOverlay ? null : chatDisplay.canvas.worldCamera;
+                int linkIndex = TMP_TextUtilities.FindIntersectingLink(chatDisplay, Input.mousePosition, cam);
+                if (linkIndex != currentlyHoveredLinkIndex) currentlyHoveredLinkIndex = linkIndex;
+            }
         }
     }
 
-    // 🌟 專屬斬首副程式
+    // 🌟 符合 IPointerClickHandler 的介面實作 (雙重保障)
+    public void OnPointerClick(PointerEventData eventData)
+    {
+        // 此處邏輯已整合進 EventTrigger，保留空實作確保介面完整
+    }
+
+    // 🌟 新版精準消案驗證 (料號+內容+工號)
+    public void TriggerDeleteVerification()
+    {
+        AppendRawMessage($"<color=#FFD700>【消案校對】確認消案料號：<b>{tempPartSN}</b></color>");
+        AppendRawMessage($"<color=#FFFFFF>內容描述：<b>{tempPartContent}</b></color>");
+        AppendRawMessage("<color=#00FFFF>【最終授權】請輸入您的「工號」執行雲端軟刪除：</color>");
+        currentInputState = InputState.WaitingResolveID;
+        if (actionMenuPanel != null) actionMenuPanel.SetActive(false);
+
+        // 點擊後重置捲動位置以便觀看提示
+        RectTransform contentRect = chatDisplay.GetComponent<RectTransform>();
+        if (contentRect != null) contentRect.anchoredPosition = Vector2.zero;
+    }
+
+    // 🌟 舊版相容消案程序
     public void TriggerDeleteProcess(string sn)
     {
         tempPart = sn;
-        AppendRawMessage($"<color=#FFD700>【準備斬首】您已選中料號：<b>{sn}</b></color>");
-        AppendRawMessage("<color=#00FFFF>【系統提示】請在下方輸入您的「工號」以執行徹底刪除：</color>");
+        tempPartSN = sn;
+        AppendRawMessage($"<color=#FFD700>【準備消案】選中料號：<b>{sn}</b></color>");
+        AppendRawMessage("<color=#00FFFF>【系統提示】請輸入您的「工號」以完成授權：</color>");
         currentInputState = InputState.WaitingID;
         if (actionMenuPanel != null) actionMenuPanel.SetActive(false);
-
-        // 點擊後將對話框強制拉下來看提示
         RectTransform contentRect = chatDisplay.GetComponent<RectTransform>();
         if (contentRect != null) contentRect.anchoredPosition = Vector2.zero;
+    }
+
+    // 🌟 被遺忘的衛星抓取指令：觸發 Python 腳本任務
+    public void OnRequestScrapeClicked()
+    {
+        if (actionMenuPanel != null) actionMenuPanel.SetActive(false);
+        string command = "執行內網底片抓取任務";
+        AppendToDisplay("工程師", command, userColor);
+        StartCoroutine(SendToFirebase(command));
+        AppendRawMessage("<color=#00FFFF>【系統】偵查兵陳平已翻山越嶺，前去抓取百筆底片資料...</color>");
     }
 
     void ToggleMonitorMode()
@@ -182,17 +254,16 @@ public class AgentCore : MonoBehaviour
         isMonitorMode = !isMonitorMode;
         if (isMonitorMode)
         {
-            headerTitle.text = "【底片輸出進度實時看板】";
-            if (chatScrollArea != null) chatScrollArea.SetActive(true);
-            if (marqueePanel != null) marqueePanel.SetActive(true);
-            if (tableTitlePanel != null) tableTitlePanel.SetActive(true); // 🌟 顯示獨立標題
+            headerTitle.text = "【AI Tooling 即時看板】";
+            if (tableTitlePanel != null) tableTitlePanel.SetActive(true);
+            chatScrollArea.SetActive(true);
+            marqueePanel.SetActive(true);
         }
         else
         {
             headerTitle.text = "【PCB 落地 AI AR 戰略目標】";
-            if (chatScrollArea != null) chatScrollArea.SetActive(true);
-            if (marqueePanel != null) marqueePanel.SetActive(false);
-            if (tableTitlePanel != null) tableTitlePanel.SetActive(false); // 🌟 隱藏獨立標題
+            if (tableTitlePanel != null) tableTitlePanel.SetActive(false);
+            marqueePanel.SetActive(false);
             currentInputState = InputState.Chat;
         }
     }
@@ -202,20 +273,9 @@ public class AgentCore : MonoBehaviour
         if (actionMenuPanel != null) actionMenuPanel.SetActive(false);
         currentInputState = next;
         if (chatScrollArea != null) chatScrollArea.SetActive(true);
-
-        if (next == InputState.WaitingAdd)
-            AppendRawMessage("<color=#FFD700>【系統提示】請輸入欲下 Tooling 的料號名稱：</color>");
-        else if (next == InputState.WaitingResolve)
-            AppendRawMessage("<color=#00FFFF>【消案指令】請輸入要從看板上刪除的「廠內序號 (SN)」：</color>");
-    }
-
-    public void OnRequestScrapeClicked()
-    {
-        if (actionMenuPanel != null) actionMenuPanel.SetActive(false);
-        string command = "執行內網底片抓取任務";
-        AppendToDisplay("工程師", command, userColor);
-        StartCoroutine(SendToFirebase(command));
-        AppendRawMessage("<color=#00FFFF>【系統】偵查兵陳平已出發...</color>");
+        if (next == InputState.WaitingAdd) AppendRawMessage("<color=#FFD700>【系統提示】請輸入欲新增料號：</color>");
+        else if (next == InputState.WaitingResolveSN) AppendRawMessage("<color=#00FFFF>【消案指令】請點選表格 [操作] 或輸入「料號」：</color>");
+        else if (next == InputState.WaitingResolve) AppendRawMessage("<color=#00FFFF>【消案指令】請輸入欲刪除的廠內序號 (SN)：</color>");
     }
 
     IEnumerator FetchMonitorData()
@@ -224,6 +284,7 @@ public class AgentCore : MonoBehaviour
         {
             if (isMonitorMode)
             {
+                // 1. 取得資料與宣告變數 (解決 CS0103 報錯)
                 UnityWebRequest req = UnityWebRequest.Get($"{firebaseUrl}tooling_monitor.json");
                 yield return req.SendWebRequest();
 
@@ -231,14 +292,48 @@ public class AgentCore : MonoBehaviour
                 {
                     string json = req.downloadHandler.text;
                     MatchCollection itemMatches = Regex.Matches(json, "{[^{}]+}");
+                    bool isLandscape = Screen.width > Screen.height;
 
-                    // 🌟 標題已分離，這裡只裝純資料
                     string listContent = "";
-
+                    string headerContent = "";
                     HashSet<string> uniqueSNs = new HashSet<string>();
-                    string marqueeString = " 🚨 今日未重複待辦料號： ";
-                    int index = 1;
+                    string marqueeString = " 🚨 今日待辦料號： ";
+                    int index = 1; int linkCounter = 0;
 
+                    // 🌟【精準座標分流】
+                    // 橫屏 (Landscape): 顯示工程師與操作
+                    string lPosIdx = "<pos=1.5%>"; string lPosSN = "<pos=8%>"; string lPosCon = "<pos=25%>";
+                    string lPosEng = "<pos=51%>"; string lPosTime = "<pos=68%>"; string lPosAct = "<pos=88%>";
+
+                    // 直屏 (Portrait): 移除操作欄位，釋放空間
+                    string pPosIdx = "<pos=2%>"; string pPosSN = "<pos=14%>"; string pPosCon = "<pos=40%>";
+                    string pPosTime = "<pos=72%>";
+
+                    // 2. 更新標題 UI：強制物理座標校正
+                    if (tableTitlePanel != null && chatDisplay != null)
+                    {
+                        TMP_Text tText = tableTitlePanel.GetComponentInChildren<TMP_Text>();
+                        if (tText != null)
+                        {
+                            // 🌟【關鍵技術修正】強制同步 Pivot 為左上角 (0, 1)
+                            tText.rectTransform.pivot = new Vector2(0, 1);
+
+                            // 🌟【自動歸位】不論直橫屏，既然 Pivot 是 0，PosX 統一設為 1 即可對齊起點
+                            tText.rectTransform.anchoredPosition = new Vector2(1f, tText.rectTransform.anchoredPosition.y);
+
+                            // 強制寬度同步
+                            tText.rectTransform.SetSizeWithCurrentAnchors(RectTransform.Axis.Horizontal, chatDisplay.rectTransform.rect.width);
+
+                            if (isLandscape)
+                                headerContent = $"{lPosIdx}項次{lPosSN}廠內序號{lPosCon}輸出內容{lPosEng}<color=#FFA500>工程師</color>{lPosTime}輸出時間{lPosAct}操作";
+                            else
+                                headerContent = $"{pPosIdx}項次{pPosSN}廠內序號{pPosCon}內容描述{pPosTime}時間";
+
+                            tText.text = headerContent;
+                        }
+                    }
+
+                    // 3. 遍歷資料列內容
                     foreach (Match item in itemMatches)
                     {
                         string itemJson = item.Value;
@@ -247,29 +342,33 @@ public class AgentCore : MonoBehaviour
                         string sn = Regex.Match(itemJson, "\"sn\":\"([^\"]+)\"").Groups[1].Value;
                         string content = Regex.Match(itemJson, "\"content\":\"([^\"]+)\"").Groups[1].Value;
                         string time = Regex.Match(itemJson, "\"time\":\"([^\"]+)\"").Groups[1].Value;
+                        string eng = Regex.Match(itemJson, "\"eng\":\"([^\"]+)\"").Groups[1].Value;
+                        string dbKey = Regex.Match(itemJson, "\"db_key\":\"([^\"]+)\"").Groups[1].Value;
 
                         if (sn.Contains("歡迎") || sn.Contains("底片") || string.IsNullOrEmpty(sn)) continue;
                         if (time.Length >= 16) time = time.Substring(5, 11);
 
-                        if (uniqueSNs.Add(sn))
-                        {
-                            marqueeString += $" 【{sn}】 ✦ ";
-                        }
+                        if (uniqueSNs.Add(sn)) marqueeString += $" 【{sn}】 ✦ ";
 
-                        // 🎨 完美五欄位比例：項次(4%)、料號(18%)、內容(40%)、時間(65%)、刪除(90%)
-                        string deleteButton = $"<link=\"{sn}\"><color=#FF0000><u>[X]</u></color></link>";
+                        // [操作] 按鈕僅在橫屏顯示
+                        string btnStyle = (linkCounter == currentlyHoveredLinkIndex && isHoveringTable) ? "<u><color=#FFFF00>[消案]</color></u>" : "<color=#00FF00>[操作]</color>";
+                        string deleteButton = $"<link=\"{dbKey}|{sn}|{content}\">{btnStyle}</link>";
+                        string idxStr = $"<mspace=0.6em>{index}</mspace>";
 
-                        listContent += $"<size=40><pos=4%><mspace=0.6em>{index,2}</mspace></pos><pos=18%><color=#00FFFF><mspace=0.6em>{sn}</mspace></color></pos><pos=40%><mspace=0.6em>{content}</mspace></pos><pos=65%><mspace=0.6em>{time}</mspace></pos><pos=90%>{deleteButton}</pos></size>\n\n";
+                        if (isLandscape)
+                            listContent += $"<size=38>{lPosIdx}{idxStr}{lPosSN}<color=#00FFFF>{sn}</color>{lPosCon}{content}{lPosEng}<color=#FFA500>{eng}</color>{lPosTime}{time}{lPosAct}{deleteButton}</size>\n\n";
+                        else
+                            listContent += $"<size=42>{pPosIdx}{idxStr}{pPosSN}<color=#00FFFF>{sn}</color>{pPosCon}{content}{pPosTime}{time}</size>\n\n";
 
-                        index++;
+                        index++; linkCounter++;
                     }
 
-                    if (index == 1) listContent = "<size=60><color=#00FF00>✅ 產線清空！目前所有項目皆已消案或刪除。</color></size>";
+                    if (index == 1) listContent = "<size=60><color=#00FF00>✅ 產線清空！目前無待辦事項。</color></size>";
 
-                    if (!isHoveringTable)
+                    if (!isHoveringTable && chatDisplay != null)
                     {
                         if (marqueeText != null) marqueeText.text = marqueeString;
-                        if (chatDisplay != null) chatDisplay.text = listContent;
+                        chatDisplay.text = listContent;
                         Canvas.ForceUpdateCanvases();
                     }
                 }
@@ -281,22 +380,40 @@ public class AgentCore : MonoBehaviour
     void OnSendClicked()
     {
         if (string.IsNullOrEmpty(userInput.text)) return;
-        string msg = userInput.text;
-        userInput.text = "";
+        string msg = userInput.text; userInput.text = "";
 
         switch (currentInputState)
         {
             case InputState.WaitingAdd:
-                StartCoroutine(UpdateFirebaseTooling(msg, "", "Pending"));
+                // 手動新增時，組合一個 safeKey
+                string manualKey = $"{msg}_手動".Replace(".", "_");
+                StartCoroutine(UpdateFirebaseTooling(manualKey, msg, "手動新增", "Pending"));
                 currentInputState = InputState.Chat;
                 break;
-            case InputState.WaitingResolve:
+            case InputState.WaitingResolveSN:
+                tempPartSN = msg;
+                AppendRawMessage($"料號 {tempPartSN}，請輸入該筆的「輸出內容」進行核對：");
+                currentInputState = InputState.WaitingResolveContent;
+                break;
+            case InputState.WaitingResolveContent:
+                tempPartContent = msg;
+                AppendRawMessage($"最後一步：請輸入「工號」執行雲端消案：");
+                currentInputState = InputState.WaitingResolveID;
+                break;
+            case InputState.WaitingResolveID:
+                // 最終合成 Key 並發送 PATCH
+                string finalKey = $"{tempPartSN}_{tempPartContent}".Replace(".", "_").Replace("#", "_").Replace("$", "_").Replace("[", "_").Replace("]", "_").Replace("/", "_");
+                StartCoroutine(UpdateFirebaseTooling(finalKey, tempPartSN, tempPartContent, "Resolved"));
+                currentInputState = InputState.Chat;
+                break;
+            case InputState.WaitingResolve: // 兼容舊版修正：必須補齊四個參數 (dbKey, sn, content, status)
                 tempPart = msg;
-                AppendRawMessage("<color=#00FFFF>【系統提示】請輸入產品工程師您的「工號」以完成消案授權：</color>");
+                AppendRawMessage("<color=#00FFFF>【系統提示】請輸入工號以完成消案授權：</color>");
                 currentInputState = InputState.WaitingID;
                 break;
-            case InputState.WaitingID:
-                StartCoroutine(UpdateFirebaseTooling(tempPart, msg, "Resolved"));
+            case InputState.WaitingID: // 兼容舊版修正：必須補齊四個參數 (dbKey, sn, content, status)
+                // 🌟 核心修正點：將本來的 3 個參數補齊為 4 個，以符合方法定義
+                StartCoroutine(UpdateFirebaseTooling(tempPart, tempPart, "舊版兼容消案", "Resolved"));
                 currentInputState = InputState.Chat;
                 tempPart = "";
                 break;
@@ -308,153 +425,30 @@ public class AgentCore : MonoBehaviour
         }
     }
 
-    IEnumerator SendToFirebase(string message)
+    // 🌟 修正：多功能 Firebase 更新程式
+    IEnumerator UpdateFirebaseTooling(string dbKey, string sn, string content, string status)
     {
-        string responseUrl = firebaseUrl + "chat/aiResponse.json";
-        UnityWebRequest clearReq = UnityWebRequest.Delete(responseUrl);
-        yield return clearReq.SendWebRequest();
+        string url = $"{firebaseUrl}tooling_monitor/{dbKey}.json";
+        string timeStr = DateTime.Now.ToString("MM-dd HH:mm");
 
-        string url = firebaseUrl + "chat/userInput.json";
-        string jsonData = $"{{\"text\":\"{message}\", \"model\":\"{aiModels[currentModelIndex]}\"}}";
-        byte[] bodyRaw = Encoding.UTF8.GetBytes(jsonData);
+        string json = status == "Resolved" ?
+            "{\"status\":\"Resolved\"}" :
+            $"{{\"sn\":\"{sn}\", \"content\":\"{content}\", \"status\":\"Fetched\", \"eng\":\"手動\", \"time\":\"{timeStr}\", \"db_key\":\"{dbKey}\"}}";
 
-        UnityWebRequest request = new UnityWebRequest(url, "PUT");
-        request.uploadHandler = new UploadHandlerRaw(bodyRaw);
-        request.downloadHandler = new DownloadHandlerBuffer();
-        request.SetRequestHeader("Content-Type", "application/json");
-
-        yield return request.SendWebRequest();
-    }
-
-    IEnumerator ListenForAIResponse()
-    {
-        isWaitingForAI = true;
-        string url = firebaseUrl + "chat/aiResponse.json";
-
-        while (isWaitingForAI)
-        {
-            yield return new WaitForSeconds(1.5f);
-            UnityWebRequest request = UnityWebRequest.Get(url);
-            yield return request.SendWebRequest();
-
-            if (request.result == UnityWebRequest.Result.Success && request.downloadHandler.text != "null")
-            {
-                string jsonResult = request.downloadHandler.text;
-                if (!string.IsNullOrEmpty(jsonResult))
-                {
-                    AIResponse response = JsonUtility.FromJson<AIResponse>(jsonResult);
-                    if (response != null && !string.IsNullOrEmpty(response.text))
-                    {
-                        AppendRawMessage(response.text);
-                        UnityWebRequest deleteReq = UnityWebRequest.Delete(url);
-                        yield return deleteReq.SendWebRequest();
-                        isWaitingForAI = false;
-                    }
-                }
-            }
-        }
-    }
-
-    IEnumerator UpdateFirebaseTooling(string part, string id, string status)
-    {
-        string time = DateTime.Now.ToString("MM-dd HH:mm");
-        string url = $"{firebaseUrl}tooling_monitor/{part}.json";
-
-        string json = status == "Pending" ?
-            $"{{\"sn\":\"{part}\", \"content\":\"手動新增\", \"time\":\"{time}\", \"status\":\"Fetched\"}}" :
-            $"{{\"sn\":\"{part}\", \"status\":\"Resolved\"}}";
-
-        byte[] bodyRaw = Encoding.UTF8.GetBytes(json);
         UnityWebRequest req = new UnityWebRequest(url, "PATCH");
-        req.uploadHandler = new UploadHandlerRaw(bodyRaw);
-        req.downloadHandler = new DownloadHandlerBuffer();
+        byte[] bodyRaw = Encoding.UTF8.GetBytes(json);
+        req.uploadHandler = new UploadHandlerRaw(bodyRaw); req.downloadHandler = new DownloadHandlerBuffer();
         req.SetRequestHeader("Content-Type", "application/json");
-
         yield return req.SendWebRequest();
 
-        AppendRawMessage($"<color=#00FF00>【斬首成功】料號 {part} 已消案並從看板永遠抹除 (於 {time} )</color>");
+        AppendRawMessage($"<color=#00FF00>【系統】項目 {sn} 已標記為 {status} (於 {timeStr})。</color>");
     }
 
-    void StartWebCam()
-    {
-        if (cameraBackground == null) return;
-        WebCamDevice[] devices = WebCamTexture.devices;
-        if (devices.Length == 0) return;
-
-        string backCamName = "";
-        for (int i = 0; i < devices.Length; i++) { if (!devices[i].isFrontFacing) { backCamName = devices[i].name; break; } }
-        if (string.IsNullOrEmpty(backCamName)) backCamName = devices[0].name;
-
-        webCamTexture = new WebCamTexture(backCamName, Screen.width, Screen.height);
-        cameraBackground.texture = webCamTexture;
-        cameraBackground.material.mainTexture = webCamTexture;
-        webCamTexture.Play();
-
-        float videoRotationAngle = webCamTexture.videoRotationAngle;
-        cameraBackground.rectTransform.localEulerAngles = new Vector3(0, 0, -videoRotationAngle);
-
-        if (videoRotationAngle == 90 || videoRotationAngle == 270)
-        {
-            cameraBackground.GetComponent<RectTransform>().sizeDelta = new Vector2(Screen.height, Screen.width);
-        }
-    }
-
-    void OnDestroy()
-    {
-        if (webCamTexture != null && webCamTexture.isPlaying) webCamTexture.Stop();
-    }
-
-    void ShowWelcomeMessage()
-    {
-        chatDisplay.text = $"<color={bodyColorHex}><color={sysColor}>【系統】次世代智庫 AR 終端已連線。等待工程師指令...</color></color>\n\n";
-    }
-
-    void OnClearClicked()
-    {
-        chatDisplay.text = "";
-        ShowWelcomeMessage();
-    }
-
-    void OnThemeCycleClicked()
-    {
-        currentThemeIndex = (currentThemeIndex + 1) % totalThemes;
-        ApplyTheme(currentThemeIndex);
-    }
-
-    void OnModelCycleClicked()
-    {
-        currentModelIndex = (currentModelIndex + 1) % aiModels.Length;
-        UpdateModelButtonUI();
-        string modelName = aiModels[currentModelIndex].ToUpper();
-        AppendRawMessage($"<color={sysColor}>【系統】兵符已切換！下道指令將由 [ {modelName} ] 執行。</color>");
-    }
-
-    void UpdateModelButtonUI()
-    {
-        if (modelBtnText != null)
-        {
-            string shortName = aiModels[currentModelIndex].Replace("gemma3:", "").ToUpper();
-            modelBtnText.text = "🧠 " + shortName;
-        }
-    }
-
-    void ApplyColorToSelectable(Selectable selectable, Color bgColor)
-    {
-        if (selectable == null) return;
-        if (selectable.image != null) selectable.image.color = Color.white;
-        ColorBlock cb = selectable.colors;
-        cb.normalColor = bgColor;
-        cb.selectedColor = bgColor;
-        cb.highlightedColor = new Color(Mathf.Clamp01(bgColor.r + 0.1f), Mathf.Clamp01(bgColor.g + 0.1f), Mathf.Clamp01(bgColor.b + 0.1f), bgColor.a);
-        cb.pressedColor = new Color(Mathf.Clamp01(bgColor.r - 0.1f), Mathf.Clamp01(bgColor.g - 0.1f), Mathf.Clamp01(bgColor.b - 0.1f), bgColor.a);
-        cb.colorMultiplier = 1f;
-        selectable.colors = cb;
-    }
-
+    // 🌟 佈景主題大回歸！
     void ApplyTheme(int index)
     {
-        Color panelBgColor = Color.clear;
-        Color btnBgColor = Color.clear;
+        Color panelBgColor = new Color32(10, 20, 35, 220); // 預設深色
+        Color btnBgColor = new Color32(0, 150, 255, 180);
         Color inputTextColor = Color.white;
         Color baseChatColor = Color.white;
 
@@ -477,17 +471,6 @@ public class AgentCore : MonoBehaviour
                 panelBgColor = new Color32(0, 0, 0, 245); btnBgColor = new Color32(0, 100, 0, 200);
                 inputTextColor = new Color32(0, 255, 0, 255); baseChatColor = new Color32(0, 255, 0, 255);
                 break;
-            case 3:
-                headerTitle.color = new Color32(219, 112, 147, 255);
-                userColor = "#C71585"; sysColor = "#FF1493"; bodyColorHex = "#000000";
-                panelBgColor = new Color32(255, 240, 245, 235); btnBgColor = new Color32(255, 200, 220, 255);
-                inputTextColor = Color.black; baseChatColor = Color.black;
-                break;
-            case 4:
-                headerTitle.color = new Color32(221, 160, 221, 255);
-                userColor = "#EE82EE"; sysColor = "#BA55D3"; bodyColorHex = "#E6E6FA";
-                panelBgColor = new Color32(20, 5, 30, 235); btnBgColor = new Color32(138, 43, 226, 180);
-                break;
         }
 
         if (mainBackground != null) mainBackground.color = panelBgColor;
@@ -503,19 +486,75 @@ public class AgentCore : MonoBehaviour
         if (chatDisplay != null) chatDisplay.color = baseChatColor;
     }
 
-    void AppendToDisplay(string sender, string msg, string hexColor)
+    void ApplyColorToSelectable(Selectable selectable, Color bgColor)
     {
-        chatDisplay.text += $"<color={hexColor}>[{sender}]</color> <color={bodyColorHex}>{msg}</color>\n\n";
+        if (selectable == null) return;
+        ColorBlock cb = selectable.colors;
+        cb.normalColor = bgColor;
+        cb.selectedColor = bgColor;
+        cb.highlightedColor = new Color(Mathf.Clamp01(bgColor.r + 0.1f), Mathf.Clamp01(bgColor.g + 0.1f), Mathf.Clamp01(bgColor.b + 0.1f), bgColor.a);
+        selectable.colors = cb;
     }
 
-    void AppendRawMessage(string rawMsg)
+    void OnThemeCycleClicked() { currentThemeIndex = (currentThemeIndex + 1) % totalThemes; ApplyTheme(currentThemeIndex); }
+    void OnModelCycleClicked() { currentModelIndex = (currentModelIndex + 1) % aiModels.Length; UpdateModelButtonUI(); string modelName = aiModels[currentModelIndex].ToUpper(); AppendRawMessage($"<color={sysColor}>【系統】兵符切換至 [ {modelName} ]。</color>"); }
+    void UpdateModelButtonUI() { if (modelBtnText != null) modelBtnText.text = "🧠 " + aiModels[currentModelIndex].Replace("gemma3:", "").ToUpper(); }
+    void ShowWelcomeMessage() { chatDisplay.text = $"<color={sysColor}>【系統】航空級 AR 指揮塔連線中...</color>\n\n"; }
+    void OnClearClicked() { chatDisplay.text = ""; ShowWelcomeMessage(); }
+    void AppendToDisplay(string sender, string msg, string hexColor) { chatDisplay.text += $"<color={hexColor}>[{sender}]</color> <color={bodyColorHex}>{msg}</color>\n\n"; }
+    void AppendRawMessage(string rawMsg) { chatDisplay.text += $"<color={bodyColorHex}>{rawMsg}</color>\n\n"; }
+
+    IEnumerator SendToFirebase(string message)
     {
-        chatDisplay.text += $"<color={bodyColorHex}>{rawMsg}</color>\n\n";
+        string responseUrl = firebaseUrl + "chat/aiResponse.json";
+        yield return UnityWebRequest.Delete(responseUrl).SendWebRequest();
+        string url = firebaseUrl + "chat/userInput.json";
+        string jsonData = $"{{\"text\":\"{message}\", \"model\":\"{aiModels[currentModelIndex]}\"}}";
+        byte[] bodyRaw = Encoding.UTF8.GetBytes(jsonData);
+        UnityWebRequest request = new UnityWebRequest(url, "PUT");
+        request.uploadHandler = new UploadHandlerRaw(bodyRaw); request.downloadHandler = new DownloadHandlerBuffer();
+        request.SetRequestHeader("Content-Type", "application/json");
+        yield return request.SendWebRequest();
     }
+
+    IEnumerator ListenForAIResponse()
+    {
+        isWaitingForAI = true; string url = firebaseUrl + "chat/aiResponse.json";
+        while (isWaitingForAI)
+        {
+            yield return new WaitForSeconds(1.5f);
+            UnityWebRequest request = UnityWebRequest.Get(url);
+            yield return request.SendWebRequest();
+            if (request.result == UnityWebRequest.Result.Success && request.downloadHandler.text != "null")
+            {
+                AIResponse response = JsonUtility.FromJson<AIResponse>(request.downloadHandler.text);
+                if (response != null && !string.IsNullOrEmpty(response.text))
+                {
+                    AppendRawMessage(response.text);
+                    yield return UnityWebRequest.Delete(url).SendWebRequest();
+                    isWaitingForAI = false;
+                }
+            }
+        }
+    }
+
+    void StartWebCam()
+    {
+        if (cameraBackground == null) return;
+        WebCamDevice[] devices = WebCamTexture.devices;
+        if (devices.Length == 0) return;
+        string backCamName = "";
+        for (int i = 0; i < devices.Length; i++) { if (!devices[i].isFrontFacing) { backCamName = devices[i].name; break; } }
+        if (string.IsNullOrEmpty(backCamName)) backCamName = devices[0].name;
+        webCamTexture = new WebCamTexture(backCamName, Screen.width, Screen.height);
+        cameraBackground.texture = webCamTexture;
+        webCamTexture.Play();
+        // 旋停修正
+        float rot = webCamTexture.videoRotationAngle;
+        cameraBackground.rectTransform.localEulerAngles = new Vector3(0, 0, -rot);
+    }
+
+    void OnDestroy() { if (webCamTexture != null && webCamTexture.isPlaying) webCamTexture.Stop(); }
 }
 
-[System.Serializable]
-public class AIResponse
-{
-    public string text;
-}
+[System.Serializable] public class AIResponse { public string text; }
