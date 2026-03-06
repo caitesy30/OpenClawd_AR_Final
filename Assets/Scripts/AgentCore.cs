@@ -9,11 +9,11 @@ using UnityEngine.UI;
 using UnityEngine.EventSystems; // 🌟 必須引入，處理點擊與懸停
 using System.Text.RegularExpressions;
 
-public class AgentCore : MonoBehaviour, IPointerClickHandler // 🌟 繼承點擊介面
+public class AgentCore : MonoBehaviour
 {
     [Header("全息 UI 綁定區")]
     public TMP_Text headerTitle;
-    public TMP_Text chatDisplay;
+    public TMP_Text chatDisplay; // 🌟 這裡現在只放純資料，不放標題！
     public TMP_InputField userInput;
     public Button sendButton;
     public Button clearButton;
@@ -24,6 +24,7 @@ public class AgentCore : MonoBehaviour, IPointerClickHandler // 🌟 繼承點�
     public Button monitorModeButton;
     public GameObject chatScrollArea;
     public GameObject marqueePanel;
+    public GameObject tableTitlePanel;   // 🌟 廠長新增：獨立的標題物件 (請將 TableTitleText 拖入)
     public RectTransform marqueeTextRect;
     public TMP_Text marqueeText;
     public Button actionMenuButton;
@@ -62,9 +63,6 @@ public class AgentCore : MonoBehaviour, IPointerClickHandler // 🌟 繼承點�
     private int currentModelIndex = 0;
     private TMP_Text modelBtnText;
 
-    // 🌟 用來追蹤目前滑鼠懸停在哪個連結上
-    private int currentlyHoveredLinkIndex = -1;
-
     void Start()
     {
         sendButton.onClick.AddListener(OnSendClicked);
@@ -83,6 +81,39 @@ public class AgentCore : MonoBehaviour, IPointerClickHandler // 🌟 繼承點�
         if (addToolingBtn != null) addToolingBtn.onClick.AddListener(() => SwitchInputState(InputState.WaitingAdd));
         if (resolveToolingBtn != null) resolveToolingBtn.onClick.AddListener(() => SwitchInputState(InputState.WaitingResolve));
         if (scrapeDataBtn != null) scrapeDataBtn.onClick.AddListener(OnRequestScrapeClicked);
+
+        // 🌟 終極雷達裝配：為 ChatDisplay 自動掛上感應器與相機校正
+        if (chatDisplay != null)
+        {
+            EventTrigger trigger = chatDisplay.gameObject.GetComponent<EventTrigger>() ?? chatDisplay.gameObject.AddComponent<EventTrigger>();
+            trigger.triggers.Clear();
+
+            // 滑鼠進入 (暫停捲動)
+            EventTrigger.Entry enterEntry = new EventTrigger.Entry { eventID = EventTriggerType.PointerEnter };
+            enterEntry.callback.AddListener((data) => { isHoveringTable = true; });
+            trigger.triggers.Add(enterEntry);
+
+            // 滑鼠離開 (恢復捲動)
+            EventTrigger.Entry exitEntry = new EventTrigger.Entry { eventID = EventTriggerType.PointerExit };
+            exitEntry.callback.AddListener((data) => { isHoveringTable = false; });
+            trigger.triggers.Add(exitEntry);
+
+            // 🌟 精準點擊斬首！
+            EventTrigger.Entry clickEntry = new EventTrigger.Entry { eventID = EventTriggerType.PointerClick };
+            clickEntry.callback.AddListener((data) => {
+                PointerEventData pData = (PointerEventData)data;
+                // 自動判斷是否在 AR 相機模式下
+                Camera cam = chatDisplay.canvas.renderMode == RenderMode.ScreenSpaceOverlay ? null : chatDisplay.canvas.worldCamera;
+
+                int linkIndex = TMP_TextUtilities.FindIntersectingLink(chatDisplay, pData.position, cam);
+                if (linkIndex != -1)
+                {
+                    string clickedSN = chatDisplay.textInfo.linkInfo[linkIndex].GetLinkID();
+                    TriggerDeleteProcess(clickedSN);
+                }
+            });
+            trigger.triggers.Add(clickEntry);
+        }
 
         ApplyTheme(currentThemeIndex);
         ShowWelcomeMessage();
@@ -105,74 +136,45 @@ public class AgentCore : MonoBehaviour, IPointerClickHandler // 🌟 繼承點�
                 }
             }
 
-            // 2. 下方表格垂直捲動邏輯 
-            if (chatScrollArea != null && chatDisplay != null)
+            // 2. 🌟 下方表格「無縫瀑布流」邏輯
+            if (chatScrollArea != null && chatDisplay != null && !isHoveringTable)
             {
                 RectTransform scrollRectTransform = chatScrollArea.GetComponent<RectTransform>();
-                isHoveringTable = RectTransformUtility.RectangleContainsScreenPoint(scrollRectTransform, Input.mousePosition);
+                ScrollRect sr = chatScrollArea.GetComponent<ScrollRect>();
 
-                if (!isHoveringTable)
+                if (sr != null)
                 {
-                    ScrollRect sr = chatScrollArea.GetComponent<ScrollRect>();
-                    if (sr != null)
+                    sr.movementType = ScrollRect.MovementType.Unrestricted;
+                    RectTransform contentRect = sr.content;
+
+                    if (contentRect != null)
                     {
-                        sr.movementType = ScrollRect.MovementType.Unrestricted;
-                        RectTransform contentRect = sr.content;
-                        if (contentRect != null && contentRect.rect.height > scrollRectTransform.rect.height)
+                        // 強制向上推進
+                        contentRect.anchoredPosition += Vector2.up * bottomScrollSpeed * Time.deltaTime;
+
+                        // 🌟 無縫輪播算法：當內容的尾巴越過視窗頂部時，瞬間拉到視窗正下方
+                        if (contentRect.anchoredPosition.y >= contentRect.rect.height)
                         {
-                            float normalizedSpeed = (bottomScrollSpeed / contentRect.rect.height) * Time.deltaTime;
-                            sr.verticalNormalizedPosition -= normalizedSpeed;
-
-                            if (sr.verticalNormalizedPosition < -0.05f)
-                            {
-                                sr.verticalNormalizedPosition = 1.05f;
-                            }
+                            contentRect.anchoredPosition = new Vector2(contentRect.anchoredPosition.x, -scrollRectTransform.rect.height);
                         }
-                    }
-
-                    // 若沒有懸停，清除選取特效
-                    if (currentlyHoveredLinkIndex != -1)
-                    {
-                        currentlyHoveredLinkIndex = -1;
-                        Canvas.ForceUpdateCanvases(); // 強制刷新以移除底線
-                    }
-                }
-                else
-                {
-                    // 🌟 懸停特效邏輯：尋找滑鼠下方的連結
-                    int linkIndex = TMP_TextUtilities.FindIntersectingLink(chatDisplay, Input.mousePosition, null);
-                    if (linkIndex != currentlyHoveredLinkIndex)
-                    {
-                        currentlyHoveredLinkIndex = linkIndex;
-                        // 觸發重新渲染以更新連結外觀 (見 FetchMonitorData 裡的邏輯)
                     }
                 }
             }
         }
     }
 
-    // 🌟 核心互動：當廠長點擊到 [X] 時觸發！
-    public void OnPointerClick(PointerEventData eventData)
+    // 🌟 專屬斬首副程式
+    public void TriggerDeleteProcess(string sn)
     {
-        if (isMonitorMode && isHoveringTable && chatDisplay != null)
-        {
-            int linkIndex = TMP_TextUtilities.FindIntersectingLink(chatDisplay, Input.mousePosition, null);
-            if (linkIndex != -1)
-            {
-                TMP_LinkInfo linkInfo = chatDisplay.textInfo.linkInfo[linkIndex];
-                string clickedSN = linkInfo.GetLinkID();
+        tempPart = sn;
+        AppendRawMessage($"<color=#FFD700>【準備斬首】您已選中料號：<b>{sn}</b></color>");
+        AppendRawMessage("<color=#00FFFF>【系統提示】請在下方輸入您的「工號」以執行徹底刪除：</color>");
+        currentInputState = InputState.WaitingID;
+        if (actionMenuPanel != null) actionMenuPanel.SetActive(false);
 
-                // 觸發刪除流程：自動填入料號，並要求輸入工號確認！
-                tempPart = clickedSN;
-                AppendRawMessage($"<color=#FFD700>【準備斬首】您已選中料號：<b>{clickedSN}</b></color>");
-                AppendRawMessage("<color=#00FFFF>【系統提示】請在下方輸入您的「工號」以執行徹底刪除：</color>");
-                currentInputState = InputState.WaitingID;
-                if (actionMenuPanel != null) actionMenuPanel.SetActive(false);
-
-                ScrollRect sr = chatScrollArea.GetComponent<ScrollRect>();
-                if (sr != null) sr.verticalNormalizedPosition = 0f;
-            }
-        }
+        // 點擊後將對話框強制拉下來看提示
+        RectTransform contentRect = chatDisplay.GetComponent<RectTransform>();
+        if (contentRect != null) contentRect.anchoredPosition = Vector2.zero;
     }
 
     void ToggleMonitorMode()
@@ -183,12 +185,14 @@ public class AgentCore : MonoBehaviour, IPointerClickHandler // 🌟 繼承點�
             headerTitle.text = "【底片輸出進度實時看板】";
             if (chatScrollArea != null) chatScrollArea.SetActive(true);
             if (marqueePanel != null) marqueePanel.SetActive(true);
+            if (tableTitlePanel != null) tableTitlePanel.SetActive(true); // 🌟 顯示獨立標題
         }
         else
         {
             headerTitle.text = "【PCB 落地 AI AR 戰略目標】";
             if (chatScrollArea != null) chatScrollArea.SetActive(true);
             if (marqueePanel != null) marqueePanel.SetActive(false);
+            if (tableTitlePanel != null) tableTitlePanel.SetActive(false); // 🌟 隱藏獨立標題
             currentInputState = InputState.Chat;
         }
     }
@@ -200,7 +204,7 @@ public class AgentCore : MonoBehaviour, IPointerClickHandler // 🌟 繼承點�
         if (chatScrollArea != null) chatScrollArea.SetActive(true);
 
         if (next == InputState.WaitingAdd)
-            AppendRawMessage("<color=#FFD700>【系統提示】程式課人員請注意，請在下方輸入欲下 Tooling 的料號名稱：</color>");
+            AppendRawMessage("<color=#FFD700>【系統提示】請輸入欲下 Tooling 的料號名稱：</color>");
         else if (next == InputState.WaitingResolve)
             AppendRawMessage("<color=#00FFFF>【消案指令】請輸入要從看板上刪除的「廠內序號 (SN)」：</color>");
     }
@@ -211,7 +215,7 @@ public class AgentCore : MonoBehaviour, IPointerClickHandler // 🌟 繼承點�
         string command = "執行內網底片抓取任務";
         AppendToDisplay("工程師", command, userColor);
         StartCoroutine(SendToFirebase(command));
-        AppendRawMessage("<color=#00FFFF>【系統】偵查兵陳平已出發，正在潛入內網抓取底片資料...</color>");
+        AppendRawMessage("<color=#00FFFF>【系統】偵查兵陳平已出發...</color>");
     }
 
     IEnumerator FetchMonitorData()
@@ -228,13 +232,12 @@ public class AgentCore : MonoBehaviour, IPointerClickHandler // 🌟 繼承點�
                     string json = req.downloadHandler.text;
                     MatchCollection itemMatches = Regex.Matches(json, "{[^{}]+}");
 
-                    string listContent = "<size=40><color=#FFFF00><b><pos=0%>項次</pos><pos=10%>廠內序號</pos><pos=35%>輸出內容</pos><pos=58%>輸出時間</pos><pos=88%>操作</pos></b></color></size>\n";
-                    listContent += "<color=#555555>──────────────────────────────────────────────────────────────────────────────</color>\n";
+                    // 🌟 標題已分離，這裡只裝純資料
+                    string listContent = "";
 
                     HashSet<string> uniqueSNs = new HashSet<string>();
                     string marqueeString = " 🚨 今日未重複待辦料號： ";
                     int index = 1;
-                    int linkCounter = 0; // 用來計算這是第幾個連結，以配合 currentlyHoveredLinkIndex
 
                     foreach (Match item in itemMatches)
                     {
@@ -253,24 +256,22 @@ public class AgentCore : MonoBehaviour, IPointerClickHandler // 🌟 繼承點�
                             marqueeString += $" 【{sn}】 ✦ ";
                         }
 
-                        // 🌟 懸停特效：如果滑鼠指著這個連結，就加上底線 <u> 和黃色特效！
-                        string btnStyle = (linkCounter == currentlyHoveredLinkIndex && isHoveringTable)
-                            ? $"<u><color=#FFFF00>[刪除]</color></u>"
-                            : $"<color=#FF0000>[X]</color>";
+                        // 🎨 完美五欄位比例：項次(4%)、料號(18%)、內容(40%)、時間(65%)、刪除(90%)
+                        string deleteButton = $"<link=\"{sn}\"><color=#FF0000><u>[X]</u></color></link>";
 
-                        string deleteButton = $"<link=\"{sn}\">{btnStyle}</link>";
-
-                        listContent += $"<size=40><pos=0%><mspace=0.6em>{index,2}</mspace></pos><pos=10%><color=#00FFFF><mspace=0.6em>{sn}</mspace></color></pos><pos=35%><mspace=0.6em>{content}</mspace></pos><pos=58%><mspace=0.6em>{time}</mspace></pos><pos=88%>{deleteButton}</pos></size>\n\n";
+                        listContent += $"<size=40><pos=4%><mspace=0.6em>{index,2}</mspace></pos><pos=18%><color=#00FFFF><mspace=0.6em>{sn}</mspace></color></pos><pos=40%><mspace=0.6em>{content}</mspace></pos><pos=65%><mspace=0.6em>{time}</mspace></pos><pos=90%>{deleteButton}</pos></size>\n\n";
 
                         index++;
-                        linkCounter++;
                     }
 
                     if (index == 1) listContent = "<size=60><color=#00FF00>✅ 產線清空！目前所有項目皆已消案或刪除。</color></size>";
 
-                    // 即使懸停也要更新 UI (為了顯示特效)，但不要干擾捲動
-                    if (marqueeText != null) marqueeText.text = marqueeString;
-                    if (chatDisplay != null) chatDisplay.text = listContent;
+                    if (!isHoveringTable)
+                    {
+                        if (marqueeText != null) marqueeText.text = marqueeString;
+                        if (chatDisplay != null) chatDisplay.text = listContent;
+                        Canvas.ForceUpdateCanvases();
+                    }
                 }
             }
             yield return new WaitForSeconds(updateInterval);
