@@ -342,7 +342,9 @@ public class AgentCore : MonoBehaviour, IPointerClickHandler // 🌟 繼承點�
                         string sn = Regex.Match(itemJson, "\"sn\":\"([^\"]+)\"").Groups[1].Value;
                         string content = Regex.Match(itemJson, "\"content\":\"([^\"]+)\"").Groups[1].Value;
                         string time = Regex.Match(itemJson, "\"time\":\"([^\"]+)\"").Groups[1].Value;
-                        string eng = Regex.Match(itemJson, "\"eng\":\"([^\"]+)\"").Groups[1].Value;
+                        // 🌟 修改點：先取得代號，再轉換為中文
+                        string eng_code = Regex.Match(itemJson, "\"eng\":\"([^\"]+)\"").Groups[1].Value;
+                        string eng = GetEngineerName(eng_code);
                         string dbKey = Regex.Match(itemJson, "\"db_key\":\"([^\"]+)\"").Groups[1].Value;
 
                         if (sn.Contains("歡迎") || sn.Contains("底片") || string.IsNullOrEmpty(sn)) continue;
@@ -555,6 +557,66 @@ public class AgentCore : MonoBehaviour, IPointerClickHandler // 🌟 繼承點�
     }
 
     void OnDestroy() { if (webCamTexture != null && webCamTexture.isPlaying) webCamTexture.Stop(); }
+
+    // 🌟 根據代號轉換中文姓名對照表
+    private string GetEngineerName(string code)
+    {
+        if (string.IsNullOrEmpty(code) || code == "---" || code == "null") return "待定";
+
+        switch (code.ToUpper())
+        {
+            // 產品工程師組
+            case "B": return "左宜芳";
+            case "KL": return "林耕申";
+            case "W": return "吳俊毅";
+            case "YC": return "丁祤宸";
+            case "JJ": return "江俊杰";
+            case "GK": return "黃俊凱";
+            case "AH": return "鄭安皓";
+            case "Y": return "張永堂";
+            case "CY": return "張志宇";
+            case "M": return "曾揚銘";
+            case "SG": return "林聖傑";
+            case "HW": return "林紘葳";
+            case "CR": return "張峻智";
+            case "NA": return "吳哲維";
+            case "JO": return "蕭光男";
+            case "XA": return "吳湘安";
+            case "S": return "宋孟哲";
+            case "EV": return "曾清瀚";
+            case "HS": return "林宏勝";
+            case "C": return "陳揚勳";
+            case "JK": return "楊順泰";
+            case "I": return "丁槐緯";
+            case "FL": return "張逢麟";
+            case "MA": return "吳奕霖";
+            case "ZY": return "顏弘恆";
+            case "JC": return "陳建廷";
+            case "JY": return "游金勝";
+            case "IV": return "吳孟軒";
+            case "CH": return "謝承翰";
+            case "LU": return "呂其炎";
+            case "WU": return "吳惠蘭";
+
+            // 專案組與量評組
+            case "F": return "邱銘駿";
+            case "KK": return "郭博文";
+            case "JX": return "藍偉展";
+            case "CM": return "莊孝賢";
+            case "P": return "李榮吉";
+            case "T": return "吳光庭";
+            case "R": return "楊明松";
+            case "HO": return "鄭政和";
+            case "XL": return "江協軒";
+            case "KV": return "潘俊仰";
+            case "KX": return "顧健民";
+            case "N": return "邱舒華";
+            case "KD": return "李昱賢";
+            case "Q": return "張凌妹";
+
+            default: return code; // 若找不到對照，則顯示原始代號
+        }
+    }
 }
 
 [System.Serializable] public class AIResponse { public string text; }
