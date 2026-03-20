@@ -2,19 +2,20 @@
 using System.Collections.Generic;
 using System.Text;
 using System;
+using System.IO; // 🌟 廠長新增：引入檔案讀寫系統，用來操作網路磁碟
 using UnityEngine;
 using UnityEngine.Networking;
 using TMPro;
 using UnityEngine.UI;
-using UnityEngine.EventSystems; // 🌟 必須引入，處理點擊與懸停
+using UnityEngine.EventSystems;
 using System.Text.RegularExpressions;
 
-public class AgentCore : MonoBehaviour, IPointerClickHandler // 🌟 繼承點擊介面，強化偵測
+public class AgentCore : MonoBehaviour, IPointerClickHandler
 {
     [Header("全息 UI 綁定區")]
     public TMP_Text headerTitle;
     public TMP_Text chatDisplay;
-    public TMP_InputField userInput; // 原本底下的輸入框 (回歸 AI 聊天使用)
+    public TMP_InputField userInput;
     public Button sendButton;
     public Button clearButton;
     public Button themeCycleButton;
@@ -24,7 +25,7 @@ public class AgentCore : MonoBehaviour, IPointerClickHandler // 🌟 繼承點�
     public Button monitorModeButton;
     public GameObject chatScrollArea;
     public GameObject marqueePanel;
-    public GameObject tableTitlePanel;   // 🌟 廠長新增：獨立的標題物件 (請將 TableTitleText 拖入)
+    public GameObject tableTitlePanel;
     public RectTransform marqueeTextRect;
     public TMP_Text marqueeText;
     public Button actionMenuButton;
@@ -32,14 +33,14 @@ public class AgentCore : MonoBehaviour, IPointerClickHandler // 🌟 繼承點�
     public Button addToolingBtn;
     public Button resolveToolingBtn;
     public Button scrapeDataBtn;
-    public Button resolveQueryBtn;      // 🌟 廠長新增：消案查詢按鈕 (偵查 Citrix 用)
+    public Button resolveQueryBtn;
 
     [Header("🏰 獨立指揮塔 (新彈出視窗)")]
-    public GameObject toolingPopupPanel;       // 🌟 彈出視窗底板
-    public TMP_Text popupInstructionText;      // 🌟 彈出視窗的提示字
-    public TMP_InputField popupInputField;     // 🌟 彈出視窗的專用輸入框
-    public Button popupConfirmBtn;             // 🌟 彈出視窗的確認鈕
-    public Button popupCancelBtn;              // 🌟 彈出視窗的取消鈕
+    public GameObject toolingPopupPanel;
+    public TMP_Text popupInstructionText;
+    public TMP_InputField popupInputField;
+    public Button popupConfirmBtn;
+    public Button popupCancelBtn;
 
     [Header("⚙️ 看板物理引擎")]
     public float updateInterval = 10f;
@@ -55,21 +56,23 @@ public class AgentCore : MonoBehaviour, IPointerClickHandler // 🌟 繼承點�
     [Header("雲端神經網路 (Firebase)")]
     public string firebaseUrl = "https://openclawd-ar-default-rtdb.asia-southeast1.firebasedatabase.app/";
 
+    // 🌟 廠長新增：內網公共戰略高地通訊埠
+    [Header("📁 內網公共磁碟交換所")]
+    public string localExchangePath = @"\\ms-utezplan\ezPlan\Form5\AiAgentDemo\Exchange";
+    private string currentRequestId = ""; // 紀錄當前問題的 ID
+
     private bool isWaitingForAI = false;
     private bool isMonitorMode = false;
 
-    // 🌟 狀態機：升級為多階消案驗證 (結合廠長新舊需求)
-    // 🌟 廠長最新指令：將 WaitingAdd 擴充為四階段 (料號 -> 內容 -> 工程師 -> 時間)
     private enum InputState { Chat, WaitingAdd, WaitingAddContent, WaitingAddEngineer, WaitingAddTime, WaitingResolveSN, WaitingResolveContent, WaitingResolveID, WaitingResolve, WaitingID }
     private InputState currentInputState = InputState.Chat;
 
-    // 🌟 儲存準備刪除或新增的組合資料 (解決 tempPart 不存在報錯)
     private string tempDbKey = "";
     private string tempPartSN = "";
     private string tempPartContent = "";
-    private string tempAddEngineer = ""; // 🌟 廠長新增：暫存工程師姓名
-    private string tempAddTime = "";      // 🌟 廠長新增：暫存手動輸入時間
-    private string tempPart = ""; // 保留舊變數以免報錯
+    private string tempAddEngineer = "";
+    private string tempAddTime = "";
+    private string tempPart = "";
 
     private string userColor = "#00BFFF";
     private string sysColor = "#00FFFF";
@@ -81,14 +84,11 @@ public class AgentCore : MonoBehaviour, IPointerClickHandler // 🌟 繼承點�
     private TMP_Text modelBtnText;
 
     private int currentlyHoveredLinkIndex = -1;
-
-    // 🌟 新增：用來記憶上次的螢幕寬高，避免重複計算
     private float lastScreenWidth = 0f;
     private float lastScreenHeight = 0f;
 
     void Start()
     {
-        // 基礎監聽掛載
         sendButton.onClick.AddListener(OnSendClicked);
         if (clearButton != null) clearButton.onClick.AddListener(OnClearClicked);
         if (themeCycleButton != null) themeCycleButton.onClick.AddListener(OnThemeCycleClicked);
@@ -103,20 +103,14 @@ public class AgentCore : MonoBehaviour, IPointerClickHandler // 🌟 繼承點�
         if (monitorModeButton != null) monitorModeButton.onClick.AddListener(ToggleMonitorMode);
         if (actionMenuButton != null) actionMenuButton.onClick.AddListener(() => actionMenuPanel.SetActive(!actionMenuPanel.activeSelf));
 
-        // 🌟 獨立視窗按鈕綁定
-        // 🌟 廠長指令：點擊後進入四階新增流程 (料號 -> 內容 -> 姓名 -> 時間)
         if (addToolingBtn != null) addToolingBtn.onClick.AddListener(() => OpenToolingPopup(InputState.WaitingAdd, "【新增 Tooling - 步驟 1/4】\n請輸入欲新增之料號："));
         if (resolveToolingBtn != null) resolveToolingBtn.onClick.AddListener(() => OpenToolingPopup(InputState.WaitingResolveSN, "【手動消案】\n請輸入欲消案之「料號」："));
         if (scrapeDataBtn != null) scrapeDataBtn.onClick.AddListener(OnRequestScrapeClicked);
-
-        // 🌟 廠長新增：消案查詢按鈕點擊事件
         if (resolveQueryBtn != null) resolveQueryBtn.onClick.AddListener(OnRequestResolveQueryClicked);
 
-        // 🌟 彈出視窗按鈕監聽
         if (popupConfirmBtn != null) popupConfirmBtn.onClick.AddListener(OnPopupConfirmClicked);
         if (popupCancelBtn != null) popupCancelBtn.onClick.AddListener(CloseToolingPopup);
 
-        // 🌟【賈伯斯防呆術】自動修復雷達：確保 UI 點擊系統存在
         if (FindObjectOfType<EventSystem>() == null)
         {
             GameObject es = new GameObject("EventSystem");
@@ -124,37 +118,29 @@ public class AgentCore : MonoBehaviour, IPointerClickHandler // 🌟 繼承點�
             es.AddComponent<StandaloneInputModule>();
         }
 
-        // 🌟 終極雷達裝配：為 ChatDisplay 自動掛上感應器與相機校正
         if (chatDisplay != null)
         {
             chatDisplay.raycastTarget = true;
             EventTrigger trigger = chatDisplay.gameObject.GetComponent<EventTrigger>() ?? chatDisplay.gameObject.AddComponent<EventTrigger>();
             trigger.triggers.Clear();
 
-            // 滑鼠進入 (暫停捲動)
             EventTrigger.Entry enterEntry = new EventTrigger.Entry { eventID = EventTriggerType.PointerEnter };
             enterEntry.callback.AddListener((data) => { isHoveringTable = true; });
             trigger.triggers.Add(enterEntry);
 
-            // 滑鼠離開 (恢復捲動)
             EventTrigger.Entry exitEntry = new EventTrigger.Entry { eventID = EventTriggerType.PointerExit };
             exitEntry.callback.AddListener((data) => { isHoveringTable = false; currentlyHoveredLinkIndex = -1; Canvas.ForceUpdateCanvases(); });
             trigger.triggers.Add(exitEntry);
 
-            // 🌟 精準點擊斬首！(處理 AR 空間坐標)
             EventTrigger.Entry clickEntry = new EventTrigger.Entry { eventID = EventTriggerType.PointerClick };
             clickEntry.callback.AddListener((data) => {
                 PointerEventData pData = (PointerEventData)data;
-                // 自動判斷是否在 AR 相機模式下
                 Camera cam = chatDisplay.canvas.renderMode == RenderMode.ScreenSpaceOverlay ? null : chatDisplay.canvas.worldCamera;
-
                 int linkIndex = TMP_TextUtilities.FindIntersectingLink(chatDisplay, pData.position, cam);
                 if (linkIndex != -1)
                 {
                     TMP_LinkInfo linkInfo = chatDisplay.textInfo.linkInfo[linkIndex];
                     string linkID = linkInfo.GetLinkID();
-
-                    // 判斷是新版組合金鑰還是舊版單一 SN
                     if (linkID.Contains("|"))
                     {
                         string[] parts = linkID.Split('|');
@@ -166,30 +152,26 @@ public class AgentCore : MonoBehaviour, IPointerClickHandler // 🌟 繼承點�
                     }
                     else
                     {
-                        TriggerDeleteProcess(linkID); // 兼容舊版
+                        TriggerDeleteProcess(linkID);
                     }
                 }
             });
             trigger.triggers.Add(clickEntry);
         }
 
-        // 🌟 初始化彈出視窗為關閉狀態
         if (toolingPopupPanel != null) toolingPopupPanel.SetActive(false);
 
-        // 🌟 啟動時執行一次自動佈局校正
         AutoAdjustMarqueeLayout();
-
         ApplyTheme(currentThemeIndex);
         ShowWelcomeMessage();
         StartWebCam();
 
-        // 啟動雲端同步協程
+        // 🌟 啟動 Firebase 雲端同步協程 (保留，用於更新表格資料)
         StartCoroutine(FetchMonitorData());
     }
 
     void Update()
     {
-        // 🌟 實時偵測螢幕變換，若是寬高改變，自動重新佈局
         if (Screen.width != lastScreenWidth || Screen.height != lastScreenHeight)
         {
             AutoAdjustMarqueeLayout();
@@ -197,18 +179,15 @@ public class AgentCore : MonoBehaviour, IPointerClickHandler // 🌟 繼承點�
 
         if (isMonitorMode)
         {
-            // 1. 上排跑馬燈邏輯 (橫向移動)
             if (marqueeTextRect != null)
             {
                 marqueeTextRect.anchoredPosition += Vector2.left * topMarqueeSpeed * Time.deltaTime;
                 if (marqueeTextRect.anchoredPosition.x < -marqueeText.preferredWidth)
                 {
-                    // 🌟 根據當前寬度重置位置
                     marqueeTextRect.anchoredPosition = new Vector2(Screen.width > 0 ? Screen.width : 1000, marqueeTextRect.anchoredPosition.y);
                 }
             }
 
-            // 2. 下排瀑布流邏輯 (無縫捲動)
             if (chatScrollArea != null && chatDisplay != null && !isHoveringTable)
             {
                 RectTransform scrollRectTransform = chatScrollArea.GetComponent<RectTransform>();
@@ -221,10 +200,7 @@ public class AgentCore : MonoBehaviour, IPointerClickHandler // 🌟 繼承點�
 
                     if (contentRect != null)
                     {
-                        // 強制向上推進
                         contentRect.anchoredPosition += Vector2.up * bottomScrollSpeed * Time.deltaTime;
-
-                        // 🌟 無縫輪播算法：當內容尾巴越過頂部，瞬間拉回視窗下方
                         if (contentRect.anchoredPosition.y >= contentRect.rect.height)
                         {
                             contentRect.anchoredPosition = new Vector2(contentRect.anchoredPosition.x, -scrollRectTransform.rect.height);
@@ -234,7 +210,6 @@ public class AgentCore : MonoBehaviour, IPointerClickHandler // 🌟 繼承點�
             }
             else if (isHoveringTable && chatDisplay != null)
             {
-                // 懸停時偵測 Link 索引以實現高亮
                 Camera cam = chatDisplay.canvas.renderMode == RenderMode.ScreenSpaceOverlay ? null : chatDisplay.canvas.worldCamera;
                 int linkIndex = TMP_TextUtilities.FindIntersectingLink(chatDisplay, Input.mousePosition, cam);
                 if (linkIndex != currentlyHoveredLinkIndex) currentlyHoveredLinkIndex = linkIndex;
@@ -242,60 +217,47 @@ public class AgentCore : MonoBehaviour, IPointerClickHandler // 🌟 繼承點�
         }
     }
 
-    // 🌟 核心新增：自動適配 16:9 與 9:16 的佈局戰術
     void AutoAdjustMarqueeLayout()
     {
         if (marqueePanel == null) return;
-
         RectTransform rect = marqueePanel.GetComponent<RectTransform>();
         if (rect == null) return;
 
         lastScreenWidth = Screen.width;
         lastScreenHeight = Screen.height;
 
-        // 🌟【兵法修正】不論比例，一律鎖定為 Top-Stretch (頂部橫向拉伸)
         rect.anchorMin = new Vector2(0, 1);
         rect.anchorMax = new Vector2(1, 1);
         rect.pivot = new Vector2(0.5f, 1f);
 
         if (Screen.width > Screen.height)
         {
-            // ⚔️ 橫向 16:9 模式：縮減高度，距離頂部稍近
-            rect.anchoredPosition = new Vector2(0, -124f); // Pos Y
-            rect.sizeDelta = new Vector2(0, 160f);          // Height
+            rect.anchoredPosition = new Vector2(0, -124f);
+            rect.sizeDelta = new Vector2(0, 160f);
         }
         else
         {
-            // ⚔️ 縱向 9:16 模式：維持大器高度
-            rect.anchoredPosition = new Vector2(0, -150f); // Pos Y
-            rect.sizeDelta = new Vector2(0, 160f);          // Height
+            rect.anchoredPosition = new Vector2(0, -150f);
+            rect.sizeDelta = new Vector2(0, 160f);
         }
 
-        // 重置邊距 Left/Right 為 0
         rect.offsetMin = new Vector2(0, rect.offsetMin.y);
         rect.offsetMax = new Vector2(0, rect.offsetMax.y);
     }
 
-    // 🌟 符合 IPointerClickHandler 的介面實作 (雙重保障)
-    public void OnPointerClick(PointerEventData eventData)
-    {
-        // 此處邏輯已整合進 EventTrigger，保留空實作確保介面完整
-    }
+    public void OnPointerClick(PointerEventData eventData) { }
 
-    // 🌟 核心新增：開啟獨立指揮塔 (彈出視窗)
     void OpenToolingPopup(InputState state, string instruction)
     {
         if (toolingPopupPanel == null) return;
-
-        actionMenuPanel.SetActive(false); // 關閉按鈕選單
-        toolingPopupPanel.SetActive(true); // 開啟獨立輸入視窗
+        actionMenuPanel.SetActive(false);
+        toolingPopupPanel.SetActive(true);
         currentInputState = state;
         popupInstructionText.text = instruction;
         popupInputField.text = "";
-        popupInputField.ActivateInputField(); // 自動聚焦輸入框
+        popupInputField.ActivateInputField();
     }
 
-    // 🌟 核心新增：關閉獨立指揮塔
     void CloseToolingPopup()
     {
         if (toolingPopupPanel != null) toolingPopupPanel.SetActive(false);
@@ -303,72 +265,55 @@ public class AgentCore : MonoBehaviour, IPointerClickHandler // 🌟 繼承點�
         tempPartSN = ""; tempPartContent = ""; tempAddEngineer = ""; tempAddTime = "";
     }
 
-    // 🌟 核心新增：處理獨立指揮塔的確認點擊邏輯 (只增不減)
-    // 🌟 廠長指令修改：WaitingAdd 流程變更為四階段 (料號 -> 內容 -> 姓名 -> 時間)
     void OnPopupConfirmClicked()
     {
         string val = popupInputField.text;
-        // 🌟 廠長特別指令：時間欄位若為空則不強制阻擋，因為沒填就抓現在
         if (string.IsNullOrEmpty(val) && currentInputState != InputState.WaitingAddTime) return;
 
         switch (currentInputState)
         {
             case InputState.WaitingAdd:
-                // 步驟 1: 料號
                 tempPartSN = val;
                 popupInstructionText.text = $"料號：<b>{val}</b>\n【步驟 2/4】請輸入輸出內容：";
                 popupInputField.text = "";
                 currentInputState = InputState.WaitingAddContent;
                 break;
-
             case InputState.WaitingAddContent:
-                // 步驟 2: 輸出內容
                 tempPartContent = val;
                 popupInstructionText.text = $"【步驟 3/4】請輸入工程師姓名：";
                 popupInputField.text = "";
                 currentInputState = InputState.WaitingAddEngineer;
                 break;
-
             case InputState.WaitingAddEngineer:
-                // 步驟 3: 工程師姓名
                 tempAddEngineer = val;
                 popupInstructionText.text = $"【步驟 4/4】輸入時間 (留空則抓現在)：\n格式範例：03-12 10:15";
                 popupInputField.text = "";
                 currentInputState = InputState.WaitingAddTime;
                 break;
-
             case InputState.WaitingAddTime:
-                // 步驟 4: 時間並最終提交
                 tempAddTime = val;
-                // 🌟 使用 Ticks 確保 Key 的唯一性
                 string manualKey = $"{tempPartSN}_{tempPartContent}_{DateTime.Now.Ticks}".Replace(".", "_").Replace("/", "_");
                 StartCoroutine(UpdateFirebaseTooling(manualKey, tempPartSN, tempPartContent, "Fetched", tempAddEngineer, tempAddTime));
                 CloseToolingPopup();
                 break;
-
             case InputState.WaitingResolveSN:
                 tempPartSN = val;
                 popupInstructionText.text = $"料號：<b>{val}</b>\n請輸入該筆的「輸出內容」進行核對：";
                 popupInputField.text = "";
                 currentInputState = InputState.WaitingResolveContent;
                 break;
-
             case InputState.WaitingResolveContent:
                 tempPartContent = val;
                 popupInstructionText.text = $"最後一步：\n請輸入「工號」執行雲端消案：";
                 popupInputField.text = "";
                 currentInputState = InputState.WaitingResolveID;
                 break;
-
             case InputState.WaitingResolveID:
-                // 最終合成 Key 並發送 PATCH
                 string finalKey = $"{tempPartSN}_{tempPartContent}".Replace(".", "_").Replace("#", "_").Replace("$", "_").Replace("[", "_").Replace("]", "_").Replace("/", "_");
                 StartCoroutine(UpdateFirebaseTooling(finalKey, tempPartSN, tempPartContent, "Resolved"));
                 CloseToolingPopup();
                 break;
-
             case InputState.WaitingID:
-                // 兼容舊版邏輯
                 StartCoroutine(UpdateFirebaseTooling(tempPart, tempPart, "舊版兼容消案", "Resolved"));
                 CloseToolingPopup();
                 tempPart = "";
@@ -376,14 +321,12 @@ public class AgentCore : MonoBehaviour, IPointerClickHandler // 🌟 繼承點�
         }
     }
 
-    // 🌟 修正：點擊表格 [操作] 也觸發獨立指揮塔
     public void TriggerDeleteVerification()
     {
         string instruction = $"【快速消案】\n料號：<b>{tempPartSN}</b>\n內容：{tempPartContent}\n請輸入「工號」完成授權：";
         OpenToolingPopup(InputState.WaitingResolveID, instruction);
     }
 
-    // 🌟 舊版相容消案程序 (也改為觸發視窗)
     public void TriggerDeleteProcess(string sn)
     {
         tempPart = sn;
@@ -392,23 +335,25 @@ public class AgentCore : MonoBehaviour, IPointerClickHandler // 🌟 繼承點�
         OpenToolingPopup(InputState.WaitingID, instruction);
     }
 
-    // 🌟 衛星抓取指令：觸發 Python 腳本任務 (原有的底片監控)
+    // 🌟 修正：衛星抓取指令改走網路磁碟
     public void OnRequestScrapeClicked()
     {
         if (actionMenuPanel != null) actionMenuPanel.SetActive(false);
         string command = "執行內網底片抓取任務";
         AppendToDisplay("工程師", command, userColor);
-        StartCoroutine(SendToFirebase(command));
+        SendToLocalDrive(command); // 🌟 改走 UNC 路徑發送
+        if (!isWaitingForAI) StartCoroutine(ListenForLocalResponse());
         AppendRawMessage("<color=#00FFFF>【系統】偵查兵陳平已翻山越嶺，前去抓取百筆底片資料...</color>");
     }
 
-    // 🌟 廠長新增：觸發新網頁 Citrix 消案查詢任務
+    // 🌟 修正：Citrix 查詢改走網路磁碟
     public void OnRequestResolveQueryClicked()
     {
         if (actionMenuPanel != null) actionMenuPanel.SetActive(false);
         string command = "執行消案底片查詢任務";
         AppendToDisplay("工程師", command, userColor);
-        StartCoroutine(SendToFirebase(command));
+        SendToLocalDrive(command); // 🌟 改走 UNC 路徑發送
+        if (!isWaitingForAI) StartCoroutine(ListenForLocalResponse());
         AppendRawMessage("<color=#FF00FF>【系統】偵查兵陳平已出發，正在滲透 Citrix 系統盤點可消案項目...</color>");
     }
 
@@ -421,7 +366,7 @@ public class AgentCore : MonoBehaviour, IPointerClickHandler // 🌟 繼承點�
             if (tableTitlePanel != null) tableTitlePanel.SetActive(true);
             chatScrollArea.SetActive(true);
             marqueePanel.SetActive(true);
-            AutoAdjustMarqueeLayout(); // 切換模式時重新校正一次
+            AutoAdjustMarqueeLayout();
         }
         else
         {
@@ -432,20 +377,19 @@ public class AgentCore : MonoBehaviour, IPointerClickHandler // 🌟 繼承點�
         }
     }
 
-    // 🌟 狀態切換邏輯
     void SwitchInputState(InputState next)
     {
         if (actionMenuPanel != null) actionMenuPanel.SetActive(false);
         currentInputState = next;
     }
 
+    // 🌟 保留：Firebase 表格資料輪詢 (不影響對話)
     IEnumerator FetchMonitorData()
     {
         while (true)
         {
             if (isMonitorMode)
             {
-                // 1. 取得資料與宣告變數
                 UnityWebRequest req = UnityWebRequest.Get($"{firebaseUrl}tooling_monitor.json");
                 yield return req.SendWebRequest();
 
@@ -461,14 +405,11 @@ public class AgentCore : MonoBehaviour, IPointerClickHandler // 🌟 繼承點�
                     string marqueeString = " 🚨 今日待辦料號： ";
                     int index = 1; int linkCounter = 0;
 
-                    // 🌟【精準座標分流】
                     string lPosIdx = "<pos=1.5%>"; string lPosSN = "<pos=8%>"; string lPosCon = "<pos=29%>";
                     string lPosEng = "<pos=51%>"; string lPosTime = "<pos=68%>"; string lPosAct = "<pos=88%>";
-
                     string pPosIdx = "<pos=2%>"; string pPosSN = "<pos=14%>"; string pPosCon = "<pos=40%>";
                     string pPosTime = "<pos=72%>";
 
-                    // 2. 更新標題 UI
                     if (tableTitlePanel != null && chatDisplay != null)
                     {
                         TMP_Text tText = tableTitlePanel.GetComponentInChildren<TMP_Text>();
@@ -487,7 +428,6 @@ public class AgentCore : MonoBehaviour, IPointerClickHandler // 🌟 繼承點�
                         }
                     }
 
-                    // 3. 遍歷資料列內容
                     foreach (Match item in itemMatches)
                     {
                         string itemJson = item.Value;
@@ -510,8 +450,7 @@ public class AgentCore : MonoBehaviour, IPointerClickHandler // 🌟 繼承點�
                         string idxStr = $"<mspace=0.6em>{index}</mspace>";
 
                         if (isLandscape)
-                            //listContent += $"<size=88>{lPosIdx}{idxStr}{lPosSN}<color=#00FFFF>{sn}</color>{lPosCon}{content}{lPosEng}<color=#FFA500>{eng}</color></size><size=68>{lPosTime}{time}{lPosAct}{deleteButton}</size>\n\n";
-                              listContent += $"<b><size=85>{lPosIdx}{idxStr}{lPosSN}<color=#00FFFF>{sn}</color>{lPosCon}{content}{lPosEng}<color=#00FFFF>{eng}</color></size></b><size=68>{lPosTime}{time}{lPosAct}{deleteButton}</size>\n\n";
+                            listContent += $"<b><size=85>{lPosIdx}{idxStr}{lPosSN}<color=#00FFFF>{sn}</color>{lPosCon}{content}{lPosEng}<color=#00FFFF>{eng}</color></size></b><size=68>{lPosTime}{time}{lPosAct}{deleteButton}</size>\n\n";
                         else
                             listContent += $"<size=42>{pPosIdx}{idxStr}{pPosSN}<color=#00FFFF>{sn}</color>{pPosCon}{content}{pPosTime}{time}</size>\n\n";
 
@@ -532,20 +471,75 @@ public class AgentCore : MonoBehaviour, IPointerClickHandler // 🌟 繼承點�
         }
     }
 
+    // 🌟 修改：對話發送改走本機磁碟
     void OnSendClicked()
     {
         if (string.IsNullOrEmpty(userInput.text)) return;
         string msg = userInput.text; userInput.text = "";
         AppendToDisplay("工程師", msg, userColor);
-        StartCoroutine(SendToFirebase(msg));
-        if (!isWaitingForAI) StartCoroutine(ListenForAIResponse());
+
+        SendToLocalDrive(msg); // 🌟 呼叫新兵器
+        if (!isWaitingForAI) StartCoroutine(ListenForLocalResponse());
     }
 
-    // 🌟 修正：多功能 Firebase 更新程式
+    // 🌟 新增：寫入 JSON 到 Inbox (內網通訊)
+    void SendToLocalDrive(string message)
+    {
+        try
+        {
+            currentRequestId = System.Guid.NewGuid().ToString().Substring(0, 8);
+            string inboxDir = Path.Combine(localExchangePath, "Inbox");
+            if (!Directory.Exists(inboxDir)) Directory.CreateDirectory(inboxDir);
+
+            string inboxPath = Path.Combine(inboxDir, "request_" + currentRequestId + ".json");
+
+            // 將內容包裝成 Python 大腦看得懂的 JSON 格式
+            string jsonData = $"{{\"text\":\"{message}\", \"model\":\"{aiModels[currentModelIndex]}\"}}";
+            File.WriteAllText(inboxPath, jsonData, Encoding.UTF8);
+        }
+        catch (Exception e)
+        {
+            AppendRawMessage($"<color=#FF0000>【系統】網路磁碟寫入失敗，請確認 {localExchangePath} 是否可存取！ ({e.Message})</color>");
+        }
+    }
+
+    // 🌟 新增：輪詢讀取 Outbox (內網通訊)
+    IEnumerator ListenForLocalResponse()
+    {
+        isWaitingForAI = true;
+        string outboxDir = Path.Combine(localExchangePath, "Outbox");
+        string outboxPath = Path.Combine(outboxDir, "response_" + currentRequestId + ".json");
+
+        while (isWaitingForAI)
+        {
+            yield return new WaitForSeconds(1.0f); // 每秒去敲一次門
+
+            if (File.Exists(outboxPath))
+            {
+                try
+                {
+                    string jsonContent = File.ReadAllText(outboxPath, Encoding.UTF8);
+                    AIResponse response = JsonUtility.FromJson<AIResponse>(jsonContent);
+
+                    if (response != null && !string.IsNullOrEmpty(response.text))
+                    {
+                        AppendRawMessage(response.text);
+                        File.Delete(outboxPath); // 🌟 讀完就銷毀情報
+                        isWaitingForAI = false;
+                    }
+                }
+                catch (Exception e)
+                {
+                    Debug.LogWarning("讀取 AI 回應時發生衝突 (可能 Python 正在寫入): " + e.Message);
+                }
+            }
+        }
+    }
+
+    // 🌟 保留： Firebase 狀態回傳
     IEnumerator UpdateFirebaseTooling(string dbKey, string sn, string content, string status, string eng = "手動", string customTime = "")
     {
         string url = $"{firebaseUrl}tooling_monitor/{dbKey}.json";
-        // 🌟 核心邏輯：若 customTime 沒填就抓現在 (DateTime.Now)
         string timeStr = string.IsNullOrEmpty(customTime) ? DateTime.Now.ToString("MM-dd HH:mm") : customTime;
 
         string json = status == "Resolved" ?
@@ -563,7 +557,7 @@ public class AgentCore : MonoBehaviour, IPointerClickHandler // 🌟 繼承點�
 
     void ApplyTheme(int index)
     {
-        Color panelBgColor = new Color32(10, 20, 35, 220); // 預設深色
+        Color panelBgColor = new Color32(10, 20, 35, 220);
         Color btnBgColor = new Color32(0, 150, 255, 180);
         Color inputTextColor = Color.white;
         Color baseChatColor = Color.white;
@@ -621,6 +615,7 @@ public class AgentCore : MonoBehaviour, IPointerClickHandler // 🌟 繼承點�
     void AppendToDisplay(string sender, string msg, string hexColor) { chatDisplay.text += $"<color={hexColor}>[{sender}]</color> <color={bodyColorHex}>{msg}</color>\n\n"; }
     void AppendRawMessage(string rawMsg) { chatDisplay.text += $"<color={bodyColorHex}>{rawMsg}</color>\n\n"; }
 
+    // 🌟 保留：舊版 Firebase 傳送以供後備或其他用途 (現已不主動呼叫)
     IEnumerator SendToFirebase(string message)
     {
         string responseUrl = firebaseUrl + "chat/aiResponse.json";
@@ -634,6 +629,7 @@ public class AgentCore : MonoBehaviour, IPointerClickHandler // 🌟 繼承點�
         yield return request.SendWebRequest();
     }
 
+    // 🌟 保留：舊版 Firebase 輪詢以供後備或其他用途 (現已不主動呼叫)
     IEnumerator ListenForAIResponse()
     {
         isWaitingForAI = true; string url = firebaseUrl + "chat/aiResponse.json";
